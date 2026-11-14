@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Combat Simulator</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1c1b19;--muted:#6b6862;--line:#e3e0d8;--accent:#2f6f4f;--accent-bg:#e7f1ea;
+--gold:#8a6410;--gold-bg:#f6edd6;--warn:#8a3b1c;--warn-bg:#f8e7df;--amber:#7a5a00;--amber-bg:#fbf1d0;--chip:#efede7;--field:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--card:#1f1f1c;--ink:#ecebe6;--muted:#a09d95;--line:#33322e;
+--accent:#7fc7a0;--accent-bg:#1e3329;--gold:#e0b858;--gold-bg:#3a3018;--warn:#f0a585;--warn-bg:#40251a;--amber:#e9c46a;--amber-bg:#3a3214;--chip:#2a2a26;--field:#262622}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding:0 16px 60px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:22px 0 10px}
+h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 8px}
+h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 6px;font-weight:600}
+.muted{color:var(--muted)}.small{font-size:12.5px}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:6px 12px}
+button:hover{background:var(--chip)}button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.grid{display:grid;grid-template-columns:400px minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{border-radius:999px;padding:5px 12px;font-weight:600;color:var(--muted)}
+.pill.on{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+.slots{display:grid;grid-template-columns:78px minmax(0,1fr);gap:6px 8px;align-items:center}
+.slots label{color:var(--muted);font-size:12.5px}
+select,input{font:inherit;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:7px;padding:5px 7px;width:100%;min-width:0}
+input[type=checkbox]{width:auto}
+.lvls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.lvls div{display:flex;flex-direction:column;font-size:12px;color:var(--muted)}
+.lvls input.changed{border-color:var(--gold);background:var(--gold-bg)}
+.note{font-size:12px;color:var(--muted);margin-top:4px}
+.warnline{font-size:12px;color:var(--warn);margin-top:4px}
+.tabs{display:flex;gap:6px;margin-bottom:10px}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:10px 0}
+@media (max-width:600px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{background:var(--chip);border-radius:10px;padding:10px 12px}
+.kpi .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--muted)}
+.kpi .d{font-size:12px;font-weight:600}.up{color:var(--accent)}.down{color:var(--warn)}
+.banner{border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13.5px}
+.banner.bad{background:var(--warn-bg);color:var(--warn)}.banner.warn{background:var(--amber-bg);color:var(--amber)}
+.banner.ok{background:var(--accent-bg);color:var(--accent)}
+table{border-collapse:collapse;width:100%}
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.scroll{overflow-x:auto}
+tr.pick{cursor:pointer}tr.pick:hover td{background:var(--chip)}tr.sel td{background:var(--accent-bg)}
+tr.isblocked td{opacity:.55}
+.tag{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.tag.bad{background:var(--warn-bg);color:var(--warn)}.tag.warn{background:var(--amber-bg);color:var(--amber)}.tag.ok{background:var(--accent-bg);color:var(--accent)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}@media (max-width:700px){.two{grid-template-columns:1fr}}
+.status{font-size:12.5px;color:var(--muted);min-height:18px}
+.gain{color:var(--accent);font-weight:700}.loss{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Combat simulator</h1>
+    <span class="muted" id="who"></span>
+    <span style="flex:1"></span>
+    <button id="reload" title="Re-read your save file">Reload save</button>
+  </header>
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Loadout</h2>
+        <div class="pills" id="loadouts"></div>
+        <div class="note">Picking a loadout loads its saved gear, stance, spell, prayers and food. Change anything below afterwards.</div>
+      </div>
+      <div class="card">
+        <h2>Equipment</h2>
+        <label class="small muted"><input type="checkbox" id="ownedOnly"> Only items I own or wear</label>
+        <div class="slots" id="slots" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
+        <h2>Fighting style</h2>
+        <div class="slots">
+          <label>Stance</label><select id="stance"></select>
+          <label id="spellLbl">Spell</label><select id="spell"></select>
+        </div>
+        <div id="ammoWarn" class="warnline"></div>
+        <h3>Prayers</h3>
+        <div class="slots" id="prayers"></div>
+        <h3>Food</h3>
+        <div class="slots">
+          <label>Food</label><select id="food"></select>
+          <label>How many</label><input id="foodQty" type="number" min="0" step="1">
+        </div>
+        <div class="note" id="foodNote"></div>
+      </div>
+      <div class="card">
+        <h2>Levels</h2>
+        <div class="lvls" id="levels"></div>
+        <div class="note">Change a level to see "what if". <a href="#" id="resetLevels">Reset levels</a></div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="tabs">
+          <button class="pill on" data-kind="enemy">One enemy</button>
+          <button class="pill" data-kind="slayer">Auto-slayer</button>
+          <span style="flex:1"></span>
+          <button id="pin" title="Keep the current result to compare against">Pin as baseline</button>
+        </div>
+        <div id="pickEnemy" class="slots"><label>Enemy</label><select id="enemy"></select></div>
+        <div id="pickMaster" class="slots" hidden><label>Master</label><select id="master"></select></div>
+        <div class="status" id="status"></div>
+        <div id="baselineNote" class="note"></div>
+      </div>
+      <div id="out"></div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const n = v => v == null || isNaN(v) ? "-" : Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1);
+const short = id => (id || "").split(":").pop();
+let INIT = null, S = null;   // S: {setup, loadout, kind, enemy, master, blocked:{masterId:Set}, baseline, last}
+const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
+// ------------------------------------------------------------------ levels and requirements
+const level = sk => (S.setup.levels && S.setup.levels[sk]) || INIT.levels[sk] || 1;
+const unmet = reqs => (reqs || []).filter(r => level(r.skill) < r.level);
+const reqText = reqs => unmet(reqs).map(r => `${r.skill} ${r.level}`).join(", ");
+const itemById = {};
+const weaponOf = () => itemById[(S.setup.equipment.Weapon || {}).item];
+
+// ------------------------------------------------------------------ setup panel
+function loadLoadout(lid) {
+  const lo = INIT.loadouts.find(l => l.loadout === lid) || INIT.loadouts[0];
+  const keepLevels = S && S.setup ? S.setup.levels : {};
+  S.setup = JSON.parse(JSON.stringify(lo));
+  S.setup.levels = keepLevels || {};
+  S.loadout = lo.loadout;
+  renderSetup();
+  schedule();
+}
+
+function renderLoadouts() {
+  $("loadouts").innerHTML = INIT.loadouts.map(l =>
+    `<button class="pill ${l.loadout === S.loadout ? "on" : ""}" data-lid="${esc(l.loadout)}">${esc(l.name)}${l.worn ? " (worn)" : ""}</button>`).join("");
+  $("loadouts").querySelectorAll("button").forEach(b => b.onclick = () => loadLoadout(b.dataset.lid));
+}
+
+function slotOptions(slot, current) {
+  const ownedOnly = $("ownedOnly").checked;
+  const w = weaponOf();
+  let items = slot.items;
+  if (slot.id === "Ammo" && w && w.ammo_needed) items = [...items].sort((a, b) => (b.ammo_type === w.ammo_needed) - (a.ammo_type === w.ammo_needed));
+  const opt = it => {
+    const need = reqText(it.reqs);
+    const qty = it.owned ? ` ×${it.owned.toLocaleString()}` : it.worn ? " (worn)" : "";
+    return `<option value="${esc(it.id)}" ${it.id === current ? "selected" : ""}>${esc(it.name)}${qty}${need ? " — needs " + esc(need) : ""}</option>`;
+  };
+  const mine = items.filter(it => it.owned || it.worn || it.id === current);
+  const other = items.filter(it => !(it.owned || it.worn) && it.id !== current);
+  return `<option value="">(empty)</option><optgroup label="Owned or worn">${mine.map(opt).join("")}</optgroup>` +
+    (ownedOnly ? "" : `<optgroup label="Not owned">${other.map(opt).join("")}</optgroup>`);
+}
+
+function renderSlots() {
+  const w = weaponOf();
+  $("slots").innerHTML = INIT.slots.map(slot => {
+    const cur = (S.setup.equipment[slot.id] || {}).item || "";
+    if (slot.id === "Offhand" && w && w.two_handed)
+      return `<label>${esc(slot.name)}</label><select disabled><option>Two-handed weapon</option></select>`;
+    return `<label>${esc(slot.name)}</label><select data-slot="${slot.id}">${slotOptions(slot, cur)}</select>`;
+  }).join("");
+  $("slots").querySelectorAll("select[data-slot]").forEach(sel => sel.onchange = () => {
+    const slot = sel.dataset.slot, v = sel.value;
+    if (v) S.setup.equipment[slot] = {item: v, qty: (itemById[v] || {}).owned || 1}; else delete S.setup.equipment[slot];
+    if (slot === "Weapon") {
+      const w2 = itemById[v];
+      if (w2 && w2.two_handed) delete S.setup.equipment.Offhand;
+      const allowed = w2 ? INIT.weapon_types[w2.weapon_type] || [] : [];
+      if (S.setup.stance && !allowed.includes(S.setup.stance)) S.setup.stance = null;
+      renderSetup();
+    } else renderStyle();
+    schedule();
+  });
+}
+
+function renderStyle() {
+  const w = weaponOf();
+  const stances = w ? INIT.weapon_types[w.weapon_type] || [] : [];
+  $("stance").innerHTML = `<option value="">Compare all stances</option>` + stances.map(s =>
+    `<option value="${esc(s)}" ${s === S.setup.stance ? "selected" : ""}>${esc(INIT.stances[s].name)} (trains ${esc(INIT.stances[s].trains.filter(t => t !== "Hitpoints").join(", "))})</option>`).join("");
+  const magic = stances.some(s => INIT.stances[s].style === "Magic");
+  $("spell").hidden = $("spellLbl").hidden = !magic;
+  if (magic) {
+    const els = (w.elements || []).filter(x => !x.endsWith("Neutral"));
+    const spells = INIT.spells.filter(s => !els.length || els.includes(s.element));
+    $("spell").innerHTML = `<option value="">Strongest unlocked</option>` + spells.map(s => {
+      const need = reqText(s.reqs);
+      return `<option value="${esc(s.id)}" ${s.id === S.setup.spell ? "selected" : ""} ${need ? "disabled" : ""}>${esc(s.name)} (max hit ${s.max_hit}; ${esc(s.runes.join(", "))})${need ? " — needs " + esc(need) : ""}</option>`;
+    }).join("");
+  }
+  const ammo = S.setup.equipment.Ammo ? itemById[S.setup.equipment.Ammo.item] : null;
+  $("ammoWarn").textContent = w && w.ammo_needed && (!ammo || ammo.ammo_type !== w.ammo_needed)
+    ? `This weapon needs ${short(w.ammo_needed)} in the Ammo slot.` : "";
+}
+
+function renderPrayers() {
+  const open = INIT.prayer_slots.filter(s => !unmet(s.reqs).length);
+  const chosen = S.setup.prayers || [];
+  $("prayers").innerHTML = INIT.prayer_slots.map((slot, i) => {
+    const locked = unmet(slot.reqs).length;
+    if (locked) return `<label>Slot ${i + 1}</label><select disabled><option>Unlocks at ${esc(reqText(slot.reqs))}</option></select>`;
+    return `<label>Slot ${i + 1}</label><select data-p="${i}"><option value="">None</option>` + INIT.prayers.map(p => {
+      const need = reqText(p.reqs);
+      return `<option value="${esc(p.id)}" ${chosen[i] === p.id ? "selected" : ""} ${need ? "disabled" : ""}>${esc(p.name)} (${p.cost} pt/turn)${need ? " — needs " + esc(need) : ""}</option>`;
+    }).join("") + `</select>`;
+  }).join("");
+  $("prayers").querySelectorAll("select[data-p]").forEach(sel => sel.onchange = () => {
+    const arr = [];
+    $("prayers").querySelectorAll("select[data-p]").forEach(x => { if (x.value && !arr.includes(x.value)) arr.push(x.value); });
+    S.setup.prayers = arr;
+    schedule();
+  });
+  if (chosen.length > open.length) S.setup.prayers = chosen.slice(0, open.length);
+}
+
+function renderFood() {
+  $("food").innerHTML = `<option value="">No food</option>` + INIT.foods.map(f =>
+    `<option value="${esc(f.id)}" ${f.id === S.setup.food ? "selected" : ""}>${esc(f.name)} (heals ${f.heal})${f.owned ? " ×" + f.owned.toLocaleString() : ""}${f.bonus ? " +bonus" : ""}</option>`).join("");
+  $("foodQty").value = S.setup.food ? (S.setup.food_qty ?? 0) : 0;
+  $("foodQty").disabled = !S.setup.food;
+  const f = INIT.foods.find(x => x.id === S.setup.food);
+  $("foodNote").textContent = f ? `You own ${f.owned.toLocaleString()}. Auto-eat starts at 25% HP and eats up to full.` : "Without food, any damage adds up until you die.";
+}
+
+function renderLevels() {
+  $("levels").innerHTML = INIT.combat_levels.map(sk => {
+    const changed = S.setup.levels[sk] != null && S.setup.levels[sk] !== INIT.levels[sk];
+    return `<div>${esc(sk)}<input type="number" min="1" max="120" data-sk="${sk}" value="${level(sk)}" class="${changed ? "changed" : ""}"></div>`;
+  }).join("");
+  $("levels").querySelectorAll("input").forEach(inp => inp.onchange = () => {
+    const v = parseInt(inp.value, 10), sk = inp.dataset.sk;
+    if (!v || v === INIT.levels[sk]) delete S.setup.levels[sk]; else S.setup.levels[sk] = v;
+    renderSetup();
+    schedule();
+  });
+}
+
+function renderSetup() {
+  renderLoadouts(); renderSlots(); renderStyle(); renderPrayers(); renderFood(); renderLevels();
+}
+
+// ------------------------------------------------------------------ targets
+function renderTargets() {
+  $("enemy").innerHTML = INIT.areas.map(a => `<optgroup label="${esc(a.name)}${a.unlocked ? "" : " (locked)"}">` +
+    a.enemies.map(e => `<option value="${esc(a.id + "|" + e.id)}" ${e.id === S.enemy && a.id === S.area ? "selected" : ""}>${esc(e.name)} (${e.hp} HP)${INIT.history[e.id] ? " ✓ fought" : ""}</option>`).join("") +
+    `</optgroup>`).join("");
+  $("master").innerHTML = INIT.masters.map(m =>
+    `<option value="${esc(m.id)}" ${m.id === S.master ? "selected" : ""}>${esc(m.name)}${m.unlocked ? "" : " (locked)"}${m.auto_slayer ? " — auto-slayer on" : ""}</option>`).join("");
+}
+
+document.querySelectorAll(".tabs .pill").forEach(b => b.onclick = () => {
+  S.kind = b.dataset.kind;
+  document.querySelectorAll(".tabs .pill").forEach(x => x.classList.toggle("on", x === b));
+  $("pickEnemy").hidden = S.kind !== "enemy";
+  $("pickMaster").hidden = S.kind !== "slayer";
+  schedule();
+});
+$("enemy").onchange = () => { [S.area, S.enemy] = $("enemy").value.split("|"); schedule(); };
+$("master").onchange = () => { S.master = $("master").value; schedule(); };
+$("stance").onchange = () => { S.setup.stance = $("stance").value || null; schedule(); };
+$("spell").onchange = () => { S.setup.spell = $("spell").value || null; schedule(); };
+$("food").onchange = () => {
+  S.setup.food = $("food").value || null;
+  const f = INIT.foods.find(x => x.id === S.setup.food);
+  S.setup.food_qty = f ? f.owned : 0;
+  renderFood(); schedule();
+};
+$("foodQty").onchange = () => { S.setup.food_qty = Math.max(0, parseInt($("foodQty").value, 10) || 0); schedule(); };
+$("ownedOnly").onchange = () => { store.set("ownedOnly", $("ownedOnly").checked ? "1" : ""); renderSlots(); };
+$("resetLevels").onclick = ev => { ev.preventDefault(); S.setup.levels = {}; renderSetup(); schedule(); };
+$("pin").onclick = () => {
+  if (!S.last) return;
+  S.baseline = {kind: S.last.kind, xp: S.last.xp, gp: S.last.gp, food: S.last.food, kills: S.last.kills, label: S.last.label};
+  $("baselineNote").textContent = `Baseline: ${S.baseline.label}. Changes below are compared with it.`;
+  draw();
+};
+$("reload").onclick = async () => {
+  $("status").textContent = "Re-reading your save…";
+  try { INIT = await api("/api/reload", {}); indexItems(); loadLoadout(S.loadout); renderTargets(); }
+  catch (e) { $("status").textContent = "Reload failed: " + e.message; }
+};
+
+// ------------------------------------------------------------------ simulate
+let timer = null, seq = 0, RESULT = null;
+function schedule() { clearTimeout(timer); timer = setTimeout(run, 250); }
+
+async function run() {
+  const my = ++seq;
+  $("status").textContent = "Simulating…";
+  if (S.master && !S.blocked[S.master]) S.blocked[S.master] = new Set((INIT.masters.find(m => m.id === S.master) || {}).blocked || []);
+  const target = S.kind === "enemy"
+    ? {kind: "enemy", enemy: S.enemy, area: S.area, stance: S.setup.stance || null}
+    : {kind: "slayer", master: S.master, stance: S.setup.stance || null, blocked: [...(S.blocked[S.master] || [])]};
+  try {
+    const t0 = performance.now();
+    const res = await api("/api/simulate", {setup: S.setup, target});
+    if (my !== seq) return;
+    RESULT = res;
+    $("status").textContent = `Simulated in ${((performance.now() - t0) / 1000).toFixed(1)}s.`;
+    draw();
+  } catch (e) {
+    if (my !== seq) return;
+    $("status").textContent = "";
+    $("out").innerHTML = `<div class="card"><div class="banner bad">${esc(e.message)}</div></div>`;
+  }
+}
+
+function survival(sv) {
+  if (!sv) return ["ok", ""];
+  const food = sv.food ? (INIT.foods.find(f => f.id === sv.food) || {}).name : null;
+  if (sv.verdict === "death" && sv.deaths_per_hr > 0)
+    return ["bad", `You can die here. A hit can take you from above the auto-eat point (${sv.auto_eat_at} HP) straight to 0 — about once every ${(1 / sv.deaths_per_hr).toFixed(1)} hours of fighting. More HP, more defence, or a higher auto-eat point fixes this.`];
+  if (sv.verdict === "death")
+    return ["bad", `With no food you die after about ${n(sv.minutes_without_food)} minutes from full HP.`];
+  if (sv.verdict === "runs_out")
+    return [sv.hours_food_lasts < 8 ? "warn" : "ok", `You eat ${n(sv.food_per_hr)} ${food} per hour. Your ${(sv.food_qty || 0).toLocaleString()} last about ${sv.hours_food_lasts.toFixed(1)} hours; then you die about ${n(sv.minutes_after_food)} minutes later.`];
+  if (sv.verdict === "eats")
+    return ["ok", `You eat ${n(sv.food_per_hr)} ${food} per hour, but you never take enough damage to die even when it runs out.`];
+  return ["ok", "Safe: you take too little damage to ever need food."];
+}
+
+function survivalTag(sv) {
+  if (!sv) return ["bad", "can't kill"];
+  if (sv.verdict === "death") return ["bad", "can die"];
+  if (sv.verdict === "runs_out" && sv.hours_food_lasts < 8) return ["warn", `food lasts ${sv.hours_food_lasts.toFixed(1)} h`];
+  if (sv.verdict === "runs_out") return ["ok", `food lasts ${Math.round(sv.hours_food_lasts)} h`];
+  if (sv.verdict === "eats") return ["ok", "eats"];
+  return ["ok", "safe"];
+}
+
+function kpi(label, v, base, unit = "") {
+  let d = "";
+  if (base != null && v != null && base !== 0) {
+    const pct = (v - base) / Math.abs(base) * 100;
+    if (Math.abs(pct) >= 0.5) d = `<div class="d ${pct > 0 ? "up" : "down"}">${pct > 0 ? "+" : ""}${pct.toFixed(0)}% vs baseline</div>`;
+  }
+  return `<div class="kpi"><div class="v">${n(v)}${unit}</div><div class="l">${esc(label)}</div>${d}</div>`;
+}
+
+function draw() {
+  const r = RESULT;
+  if (!r) return;
+  const b = S.baseline && S.baseline.kind === r.kind ? S.baseline : null;
+  if (r.kind === "enemy") return drawEnemy(r, b);
+  return drawSlayer(r, b);
+}
+
+function drawEnemy(r, b) {
+  if (!r.results.length) {
+    $("out").innerHTML = `<div class="card"><div class="banner bad">Can't kill ${esc(r.enemy)} with this setup in under 15 minutes (or no usable attack).</div></div>`;
+    S.last = null; return;
+  }
+  const pick = r.results.find(x => x.stance_id === (S.detail || S.setup.stance)) || r.results.reduce((a, x) => x.xp_hr_total > a.xp_hr_total ? x : a);
+  const fmtXp = x => Object.entries(x.xp_hr).sort((a, c) => c[1] - a[1]).map(([k, v]) => `${n(v)} ${k}`).join(", ");
+  const rows = r.results.map(x => {
+    const [cls, tag] = survivalTag(x.combat.survival);
+    return `<tr class="pick ${x === pick ? "sel" : ""}" data-st="${esc(x.stance_id)}"><td>${esc(x.stance)}${x.stance_id === r.saved_stance ? ' <span class="tag">saved</span>' : ""}</td>
+      <td class="num">${n(x.kills_hr)}</td><td class="num"><b>${n(x.xp_hr_total)}</b><div class="small muted">${esc(fmtXp(x))}</div></td>
+      <td class="num">${n(x.gp_hr)}</td><td class="num">${n(x.combat.survival.food_per_hr)}</td>
+      <td><span class="tag ${cls}">${esc(tag)}</span></td></tr>`;
+  }).join("");
+  const c = pick.combat, sv = c.survival, [cls, txt] = survival(sv);
+  S.last = {kind: "enemy", xp: pick.xp_hr_total, gp: pick.gp_hr, food: sv.food_per_hr, kills: pick.kills_hr, label: `${r.enemy}, ${pick.stance}`};
+  const xpRows = Object.entries(pick.xp_hr).sort((a, x) => x[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${n(v)}</td></tr>`).join("");
+  const loot = pick.loot.slice(0, 8).map(x => `<tr><td>${n(x.per_hr)} ${esc(x.item)}</td><td class="num">${n(x.gp_hr)}</td></tr>`).join("")
+    + (pick.coins_hr ? `<tr><td>Coins</td><td class="num">${n(pick.coins_hr)}</td></tr>` : "")
+    + Object.entries(pick.other_currency_hr).map(([k, v]) => `<tr><td>${esc(k.replace(/([a-z])([A-Z])/g, "$1 $2"))}</td><td class="num">${n(v)}</td></tr>`).join("");
+  const uses = pick.uses.length ? pick.uses.map(x => `${n(x.per_hr)} ${esc(x.item)}`).join(", ") : "nothing";
+  const h = r.history;
+  const hist = h ? `<div class="card"><h2>Compared with your save</h2><p class="small">You have <b>${h.kills.toLocaleString()}</b> recorded kills at <b>${h.seconds.toFixed(1)}s</b> each
+    (${esc(Object.entries(h.xp).filter(x => x[1] >= .05).sort((a, x) => x[1] - a[1]).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(", "))} XP per kill).
+    This setup: <b>${pick.seconds_per_kill.toFixed(1)}s</b> per kill (${esc(Object.entries(pick.xp_hr).sort((a, x) => x[1] - a[1]).map(([k, v]) => `${k} ${(v / pick.kills_hr).toFixed(1)}`).join(", "))}).</p>
+    <p class="small muted">Your record covers every past level, gear set and stance, so expect some difference.</p></div>` : "";
+  $("out").innerHTML = `<div class="card"><h2>${esc(r.enemy)} <span class="muted small">${esc(r.area)}</span></h2>
+    <div class="scroll"><table><thead><tr><th>Stance</th><th class="num">Kills / hr</th><th class="num">Combat XP / hr</th><th class="num">GP / hr</th><th class="num">Food / hr</th><th>Survival</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${r.not_viable.length ? `<p class="small muted">Not viable: ${esc(r.not_viable.join(", "))}.</p>` : ""}
+    <p class="small muted">Click a stance for its details.</p></div>
+    <div class="card"><h2>${esc(pick.stance)}</h2>
+    <div class="kpis">${kpi("Combat XP / hr", pick.xp_hr_total, b && b.xp)}${kpi("Kills / hr", pick.kills_hr, b && b.kills)}${kpi("GP / hr", pick.gp_hr, b && b.gp)}${kpi("Food / hr", sv.food_per_hr, b && b.food)}</div>
+    <div class="banner ${cls}">${esc(txt)}</div>
+    <div class="two"><div><h3>XP per hour</h3><table><tbody>${xpRows}</tbody></table></div>
+    <div><h3>Loot per hour</h3><table><tbody>${loot || '<tr><td class="muted">Nothing</td></tr>'}</tbody></table></div></div>
+    <h3>Fight</h3><p class="small">${c.hit < 1 ? (c.hit * 100).toFixed(0) + "%" : "100%"} hit chance, hits ${c.min_hit}-${c.max_hit}, a turn every ${(c.interval / 1000).toFixed(1)}s,
+      ${c.attacks.toFixed(1)} turns per kill (${pick.seconds_per_kill.toFixed(1)}s incl. 3s respawn). Enemy: ${c.hp} HP${c.armour ? `, ${c.armour} armour` : ""}${c.ward ? `, ${c.ward} ward` : ""};
+      it hits you ${(c.enemy_hit * 100).toFixed(0)}% of the time for up to ${c.enemy_max_hit} (you have ${c.player_hp} HP).
+      ${c.stunned_share >= .01 ? `You are stunned for ${(c.stunned_share * 100).toFixed(0)}% of your turns.` : ""}</p>
+    <p class="small">Uses per hour: ${uses}.${c.prayers.length ? ` Prayers: ${esc(c.prayers.join(", "))} (${n(c.prayer_points * pick.kills_hr)} points/hr).` : ""}${c.spell ? ` Spell: ${esc(c.spell)}.` : ""}</p>
+    ${c.on_task ? '<p class="small muted">Slayer XP and coins assume this enemy is your current task.</p>' : ""}
+    ${c.unsimulated.length ? `<p class="small muted">Not simulated: ${esc(c.unsimulated.join(", "))}.</p>` : ""}</div>${hist}`;
+  $("out").querySelectorAll("tr.pick").forEach(tr => tr.onclick = () => { S.detail = tr.dataset.st; draw(); });
+}
+
+function drawSlayer(r, b) {
+  const m = INIT.masters.find(x => x.id === S.master);
+  const blocked = S.blocked[S.master] || (S.blocked[S.master] = new Set(m.blocked));
+  S.last = {kind: "slayer", xp: r.xp_hr_total, gp: r.gp_hr, food: r.food_hr, kills: 3600 / (r.seconds_per_kill || 1), label: `${r.master} auto-slayer`};
+  const slots = m.block_slots_unlocked;
+  const ranked = r.rows.filter(x => x.if_blocked).sort((a, x) => x.if_blocked - a.if_blocked);
+  const best = ranked.slice(0, Math.max(0, slots - blocked.size)).filter(x => x.if_blocked > r.xp_hr_total);
+  const tips = best.length ? `<div class="banner ok">Block ${best.map(x => `<b>${esc(x.name)}</b> (+${n(x.if_blocked - r.xp_hr_total)} XP/hr)`).join(" and ")} — ${slots - blocked.size} block slot${slots - blocked.size === 1 ? "" : "s"} free.</div>`
+    : (ranked.length && ranked[0].if_blocked > r.xp_hr_total ? `<div class="banner warn">Blocking <b>${esc(ranked[0].name)}</b> would add ${n(ranked[0].if_blocked - r.xp_hr_total)} XP/hr, but you have no free block slot${slots ? "" : " (unlock one first)"}.</div>` : "");
+  const warn = (r.stuck.length ? `<div class="banner bad">Can't fight ${esc(r.stuck.join(", "))} with this setup. Auto-slayer would get stuck on that task — block it.</div>` : "")
+    + (r.deaths.length ? `<div class="banner bad">You can die against ${esc(r.deaths.join(", "))}.</div>` : "");
+  const rows = r.rows.map(x => {
+    const has = x.seconds != null;
+    const gain = x.if_blocked != null ? x.if_blocked - r.xp_hr_total : (x.if_unblocked != null ? x.if_unblocked - r.xp_hr_total : null);
+    const [cls, tag] = survivalTag(x.survival);
+    const verdict = has ? tag : (x.unlocked ? "can't kill" : "area locked");
+    return `<tr class="${x.blocked ? "isblocked" : ""}"><td><input type="checkbox" data-e="${esc(x.id)}" ${x.blocked ? "checked" : ""}></td>
+      <td>${esc(x.name)}<div class="small muted">${esc(x.area)}</div></td>
+      <td class="num">${has ? x.seconds.toFixed(1) + "s" : "-"}</td><td class="num">${x.share != null ? (x.share * 100).toFixed(0) + "%" : "-"}</td>
+      <td class="num">${has ? n(x.xp_kill) : "-"}</td><td class="num">${has ? n(x.xp_hr) : "-"}</td>
+      <td class="num ${gain > 0 ? "gain" : gain < 0 ? "loss" : ""}">${gain == null ? "-" : (gain > 0 ? "+" : "") + n(gain)}</td>
+      <td><span class="tag ${has ? cls : "bad"}">${verdict}</span></td></tr>`;
+  }).join("");
+  const xpRows = Object.entries(r.xp_hr).sort((a, x) => x[1] - a[1]).map(([k, v]) => `${n(v)} ${esc(k)}`).join(", ");
+  $("out").innerHTML = `<div class="card"><h2>${esc(r.master)} auto-slayer <span class="muted small">${esc(r.stance)} stance${S.setup.stance ? "" : " (best)"} · tasks of ${r.task_length[0]}-${r.task_length[1]} kills</span></h2>
+    <div class="kpis">${kpi("Combat XP / hr", r.xp_hr_total, b && b.xp)}${kpi("GP / hr", r.gp_hr, b && b.gp)}${kpi("Food / hr", r.food_hr, b && b.food)}${kpi("Avg s / kill", r.seconds_per_kill)}</div>
+    <p class="small">${xpRows}</p>${warn}${tips}
+    <p class="small muted">Each task is picked at random from the enemies below, so every enemy gets the same number of kills.
+      Slow enemies take the biggest share of the hour, but what matters is the XP per hour you earn on each: enemies below the
+      overall rate pull it down. Tick an enemy to block it (you have ${slots} block slot${slots === 1 ? "" : "s"} unlocked${blocked.size > slots ? `; <b>${blocked.size} ticked</b>` : ""}).
+      "If blocked" is the change in overall combat XP/hr.</p>
+    <div class="scroll"><table><thead><tr><th>Block</th><th>Enemy (weakest XP/hr first)</th><th class="num">Time / kill</th><th class="num">Share of time</th><th class="num">XP / kill</th><th class="num">XP / hr on it</th><th class="num">If blocked</th><th>Survival</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  $("out").querySelectorAll("input[data-e]").forEach(cb => cb.onchange = () => {
+    if (cb.checked) blocked.add(cb.dataset.e); else blocked.delete(cb.dataset.e);
+    schedule();
+  });
+}
+
+// ------------------------------------------------------------------ start
+function indexItems() { INIT.slots.forEach(s => s.items.forEach(it => itemById[it.id] = it)); }
+
+(async () => {
+  try {
+    INIT = await api("/api/init");
+  } catch (e) {
+    $("out").innerHTML = `<div class="card"><div class="banner bad">Could not load: ${esc(e.message)}</div></div>`;
+    return;
+  }
+  indexItems();
+  $("who").textContent = INIT.character;
+  $("ownedOnly").checked = store.get("ownedOnly") === "1";
+  S = {kind: location.hash === "#slayer" ? "slayer" : "enemy", blocked: {}, setup: null};
+  document.querySelectorAll(".tabs .pill").forEach(x => x.classList.toggle("on", x.dataset.kind === S.kind));
+  $("pickEnemy").hidden = S.kind !== "enemy";
+  $("pickMaster").hidden = S.kind !== "slayer";
+  const worn = INIT.loadouts.find(l => l.worn) || INIT.loadouts[0];
+  const recent = Object.entries(INIT.history)[0];
+  const area0 = INIT.areas.find(a => a.unlocked) || INIT.areas[0];
+  S.enemy = INIT.current_enemy || (recent ? recent[0] : area0.enemies[0].id);
+  S.area = (INIT.areas.find(a => a.enemies.some(e => e.id === S.enemy)) || area0).id;
+  const auto = INIT.masters.find(m => m.auto_slayer) || INIT.masters.find(m => m.unlocked) || INIT.masters[0];
+  S.master = auto && auto.id;
+  renderTargets();
+  loadLoadout(worn.loadout);
+})();
+</script>
+</body>
+</html>

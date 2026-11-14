@@ -1,0 +1,20 @@
+# Everything under data/ is generated on your own machine:
+#   data/raw, data/tables  - extracted from the game (not ours to redistribute)
+#   data/save              - decoded from your save (character name, bank, ids)
+#   data/calc              - your report
+data/
+
+# Your local paths (copy config.example.json to create it)
+config.local.json
+
+# Never commit a save
+*.sav
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
