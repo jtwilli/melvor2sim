@@ -70,6 +70,9 @@ class Planner:
         self.rates = calc.Rates(world.state, world.bonuses, self.reqs)
         self.by_key = {a["key"]: a for a in self.actions}
         self.food_override = None       # a Thieving food chosen in the panel instead of the saved one
+        self._tech_xp = None            # Agility technique XP while an Agility route is being planned
+        self._tech_cap = {t: o.get("LevelCap") or 40 for t, o in calc.objects("AgilityTechnique").items()} \
+            if (calc.TABLES / "objects" / "AgilityTechnique.json").exists() else {}
         self._item_tags = self._tag_items()
         self._names = self._category_names()
 
@@ -208,7 +211,12 @@ class Planner:
         return st
 
     def _state_at(self, xp):
-        return cmb.with_levels(self._base(), self._levels(xp))
+        st = cmb.with_levels(self._base(), self._levels(xp))
+        if self._tech_xp is not None:          # Agility plan: techniques at their planned XP
+            st = dict(st)
+            st["agility_techniques"] = {t: {"xp": v, "level": calc.technique_level(v, self._tech_cap.get(t, 40))}
+                                        for t, v in self._tech_xp.items()}
+        return st
 
     # ------------------------------------------------------------ skilling
     def plan(self, skill, target, no_shop=False, setup=None, focus=None, use_bank=False, assume_tools=False, food=None,
@@ -270,6 +278,10 @@ class Planner:
         at_level = {}
         for lvl in sorted({max(cur, a["level_req"] or 1) for a in acts} | {up_to}):
             st = cmb.with_levels(self._base(), {skill: lvl})
+            if skill == "Agility" and lvl == up_to:
+                # the target column assumes every technique trained to its cap (they level as you run courses)
+                st = dict(st)
+                st["agility_techniques"] = {t: {"xp": calc.technique_xp_for(c), "level": c} for t, c in self._tech_cap.items()}
             self.reqs.state, self.reqs.assume_tools = st, assume_tools
             self.rates.state, self.rates.reqs = st, self.reqs
             try:
@@ -440,12 +452,34 @@ class Planner:
         return res
 
     def _plan_skilling(self, skill, target, no_shop, focus):
+        if skill == "Agility":
+            self._tech_xp = {t: v["xp"] for t, v in (self.w.state.get("agility_techniques") or {}).items()}
+        try:
+            return self._plan_skilling_levels(skill, target, no_shop, focus)
+        finally:
+            self._tech_xp = None
+
+    @staticmethod
+    def _level_parts(cur, target, skill, xp):
+        """(level, part number) until each level is reached: a level can take several parts (Agility re-plans)."""
+        for lvl in range(cur, target):
+            part = 0
+            while xp[skill] < XP[lvl + 1] - 1e-6:
+                yield lvl, part
+                part += 1
+                if part > 8:          # safety: never loop forever on a rounding edge
+                    xp[skill] = float(XP[lvl + 1])
+
+    def _tech_gain(self, key, rates, laps):
+        return {t: v * laps for t, v in (rates[key].get("technique_xp") or {}).items()}
+
+    def _plan_skilling_levels(self, skill, target, no_shop, focus):
         w = self.w
         xp, cur, target = self._start(skill, target)
         gold = NS + "GoldPieces"
         start_levels = self._levels(xp)
         steps = []
-        for lvl in range(cur, target):
+        for lvl, part in self._level_parts(cur, target, skill, xp):
             st = self._state_at(xp)
             self.reqs.state = st
             self.rates.state, self.rates.reqs = st, self.reqs
@@ -472,10 +506,19 @@ class Planner:
                                    f"Nothing in {skill} can be trained at level {lvl} with what you have unlocked.")
             need = XP[lvl + 1] - max(xp[skill], XP[lvl])
             hours = need / row["xp_hr"]
+            if self._tech_xp is not None and part < 3:
+                # techniques level up as you run courses: if one would gain 2+ levels, stop halfway and re-plan
+                gain = self._tech_gain(row["key"], rates, row["per_hr"] * hours)
+                if any(calc.technique_level(self._tech_xp.get(t, 0) + g) - calc.technique_level(self._tech_xp.get(t, 0)) >= 2
+                       for t, g in gain.items()):
+                    hours /= 2
             for sk, v in row["xp_by_skill"].items():
                 if sk != skill:
                     xp[sk] = xp.get(sk, 0.0) + v * hours
-            xp[skill] = float(XP[lvl + 1])
+            xp[skill] = min(float(XP[lvl + 1]), max(xp[skill], XP[lvl]) + row["xp_hr"] * hours)
+            if self._tech_xp is not None:
+                for t, g in self._tech_gain(row["key"], rates, row["per_hr"] * hours).items():
+                    self._tech_xp[t] = self._tech_xp.get(t, 0.0) + g
             steps.append({
                 "level": lvl, "key": row["key"], "name": row["name"], "xp_hr": row["xp_hr"], "hours": hours,
                 "outside_focus": outside,
@@ -680,6 +723,10 @@ class Planner:
                          "until something in the focus unlocks.")
         notes.append("Mastery, pool and other bonuses you would earn on the way are not added, so real times "
                      "should be a little shorter.")
+        for i, g in enumerate(segs, 1):
+            if g.get("gp", 0) < -50_000:
+                notes.append(f"Top up: step {i} ({g['name']}) spends about {-g['gp']:,.0f} gp more than it earns, mostly "
+                             "in shop purchases. Tick 'Never buy from the shop' to plan without them.")
         if skill == "Herblore":
             notes.append("Herbs come from Farming, which grows on its own: they are counted as free here, so keep "
                          "enough planted (or use the bank option).")

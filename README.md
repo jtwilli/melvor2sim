@@ -253,6 +253,12 @@ while, and **Open in browser** opens the browser pages.
 
 - The best action in every skill by XP/hour or GP/hour, or the top actions in one
   skill. Each one shows its whole chain.
+- **Use my bank** (on by default): ingredients you already hold are used first,
+  instead of being gathered from nothing. They're charged at their sell price,
+  since you could have sold them instead. This only applies when the stock lasts
+  at least an hour, and the **From your bank** column shows how long it lasts.
+  For example, a big Feathers stock from ranching makes Feathers Flax Basket the
+  best gold in Beastcrafting.
 - **Include combat** adds your best enemies with the loadout you're wearing,
   including what each fight uses (food, ammo, runes) and the gold left after
   supplies.
@@ -536,10 +542,11 @@ If you have several characters, use `--save` to choose one.
 - **Farming, Ranching and the Grain Mill** are passive, so they aren't ranked.
   Their produce counts as free in chains when nothing else makes it, such as the
   herbs Herblore needs.
-- **Agility** success depends on your technique levels (Climbing, Jumping, ...),
-  which are kept at today's levels. Plans and look-aheads get better than shown as
-  you run courses. Agility and Thieving count the time to make the food they eat,
-  so pick a cheap food in the planner.
+- **Agility** success depends on your technique levels (Climbing, Jumping, ...).
+  The levelling planner raises them as you run courses. The look-ahead shows each
+  course with your techniques today and with them maxed, and says which technique
+  levels make it certain. Agility and Thieving count the time to make the food they
+  eat, so pick a cheap food in the planner.
 - **Astrology** counts the sighting logs from events. Temporary bonus events
   (moons, auroras) aren't counted.
 - **Not modelled:** Firemaking bonfires (a timed buff), Thieving distractions,

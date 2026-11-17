@@ -7,6 +7,7 @@ var ui               # ui.gd
 var rank := "xp"
 var skill: OptionButton
 var combat: CheckBox
+var use_bank: CheckBox
 var ahead: CheckBox
 var ahead_level: SpinBox
 var food: OptionButton
@@ -45,6 +46,12 @@ func build() -> void:
 	stealth.get_line_edit().text_submitted.connect(func(_t): run())
 	stealth.value_changed.connect(func(_v): run())
 	row.add_child(stealth)
+	use_bank = CheckBox.new()
+	use_bank.text = "Use my bank"
+	use_bank.tooltip_text = "Take ingredients you already have instead of gathering them (when the stock lasts at least an hour)"
+	use_bank.button_pressed = true
+	use_bank.toggled.connect(func(_on): run())
+	row.add_child(use_bank)
 	combat = CheckBox.new()
 	combat.text = "Include combat"
 	combat.tooltip_text = "Scans every enemy with your worn loadout (a few seconds)"
@@ -73,6 +80,7 @@ func _show_controls() -> void:
 	food.visible = one and ahead.button_pressed and (sk == "Thieving" or sk == "Agility")
 	stealth.visible = food.visible and sk == "Thieving"
 	combat.visible = not (one and ahead.button_pressed)
+	use_bank.visible = combat.visible
 
 
 func on_info() -> void:
@@ -95,7 +103,8 @@ func run() -> void:
 			"stealth": int(stealth.value) if stealth.visible else 0}
 		panel.send("/api/game/view", {"view": "ahead", "params": p}, _on_view, "Looking ahead...")
 		return
-	var params := {"rank": rank, "skill": ui.value(skill), "combat": combat.button_pressed}
+	var params := {"rank": rank, "skill": ui.value(skill), "combat": combat.button_pressed,
+		"use_bank": use_bank.button_pressed}
 	panel.send("/api/game/view", {"view": "best", "params": params}, _on_view)
 
 

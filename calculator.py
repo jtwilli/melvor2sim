@@ -43,6 +43,9 @@ def short(i):
     return i[len(NS):] if isinstance(i, str) and i.startswith(NS) else i
 
 
+cmb_short = short
+
+
 def load(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
@@ -301,6 +304,54 @@ def thieving_damage(damage, avoid, max_hp, heal, failures=20000):
     return {"food": food / failures, "deaths": deaths / failures, "fails_to_death": first_death or float("inf")}
 
 
+def technique_xp_for(level):
+    """Agility techniques' own XP curve: XP needed to reach `level`."""
+    if level < 1:
+        return 0.0
+    r = 2 ** (1 / 3.25)
+    return math.floor((level * level - level + 600 * ((2 ** (level / 3.25) - r) / (r - 1))) / 6)
+
+
+def technique_level(xp, cap=40):
+    level = 1
+    while level < cap and xp >= technique_xp_for(level + 1):
+        level += 1
+    return level
+
+
+@functools.lru_cache(maxsize=None)
+def mixed_damage(hits, avoid, max_hp, heal, failures=20000):
+    """Like thieving_damage, but each failure comes from one of several obstacles: hits = ((damage, weight), ...).
+    Returns food eaten and deaths per failure, and failures until death with no food."""
+    rng = random.Random(hash(hits) & 0xFFFF ^ max_hp * 31 + heal)
+    total = sum(wt for _, wt in hits) or 1
+    cum, acc = [], 0.0
+    for d, wt in hits:
+        acc += wt / total
+        cum.append((acc, d))
+    threshold = round(0.25 * max_hp)
+    hp, food, deaths, first_death = max_hp, 0, 0, None
+    for i in range(failures):
+        if rng.random() < avoid:
+            continue
+        x = rng.random()
+        d = next((dd for c, dd in cum if x <= c), cum[-1][1])
+        hp -= rng.randint(1, d)
+        if hp <= 0:
+            deaths += 1
+            first_death = first_death or i + 1
+            hp = max_hp
+        elif hp <= threshold and heal > 0:
+            n = max(1, (max_hp - hp) // heal)
+            food += n
+            hp = min(max_hp, hp + n * heal)
+    if heal <= 0:
+        mean = sum((d + 1) / 2 * wt for d, wt in hits) / total * (1 - avoid)
+        return {"food": 0.0, "deaths": deaths / failures, "fails_to_death": max_hp / mean if mean else float("inf")}
+    return {"food": food / failures, "deaths": deaths / failures, "fails_to_death": first_death or float("inf")}
+
+
+
 def drop_unsourced_supplies(rates, best):
     """Supplies an action uses up (combat food, ammo, runes; Thieving food) that nothing can provide are
     left out of its chain rather than dropping the action. Returns {action key: {item ids left out}}."""
@@ -322,6 +373,8 @@ class Rates:
         self.hunting = objects("HuntingAnimal")
         self.hunt_loc = objects("HuntingLocation")
         self.mining = objects("MiningRecipe")
+        tech = TABLES / "objects" / "AgilityTechnique.json"
+        self.techniques = objects("AgilityTechnique") if tech.exists() else {}
         ev = TABLES / "astrology_events.json"
         self.astro_events = load(ev) if ev.exists() else {}
         cfg = load(TABLES / "entity_config.json")
@@ -575,37 +628,49 @@ class Rates:
         t = lambda s, i=None: self.b.total(a, s, i)
         raw = a["raw_extra"]
         techs = self.state.get("agility_techniques") or {}
-        repeat, skip = min(1, t("RepeatFailedObstacleChance")), min(1, t("SkipObstacleChance"))
+        levels = {tid: (techs.get(tid) or {}).get("level", 1) for tid in self.techniques}
+        repeat, skip = t("RepeatFailedObstacleChance"), t("SkipObstacleChance")
         avoid, dbl = min(1, t("AvoidDamageChance")), min(1, t("DoublingChance"))
-        trap = max(0.0, min(0.95, 0.8 + t("FlatTrapSuccessChance")))
-        obs = []
+        obs, full_at, reward_qty = [], {}, []
         for o in raw["obstacles"]:
-            iv = math.floor((o["interval"] + t("FlatInterval")) * (1 + t("PercentInterval")))
+            diff = max(0.0, o["difficulty"] + t("FlatObstacleDifficulty"))
+            # every technique at or above this obstacle's difficulty adds its bonus to this obstacle
+            met = defaultdict(float)
+            for tid, tech in self.techniques.items():
+                if levels[tid] >= diff:
+                    for b in tech.get("DifficultyMetBonuses") or []:
+                        met[b["Stat"]["Name"]] += b["Value"]
+            iv = math.floor((o["interval"] + t("FlatInterval")) * (1 + t("PercentInterval") + met["PercentInterval"]))
             if o["trap"]:
-                p = trap
+                p = max(0.0, min(0.95, 0.8 + t("FlatTrapSuccessChance") + met["FlatTrapSuccessChance"]))
             elif not o["technique"]:
                 p = 0.6
             else:
-                level = (techs.get(o["technique"]) or {}).get("level", 1)
-                n = max(0.0, max(0.0, o["difficulty"] + t("FlatObstacleDifficulty")) - level + 1)
+                n = max(0.0, diff - levels.get(o["technique"], 1) + 1)
                 p = 0.95 ** (n / 2) if n > 0 else 1.0
+                need = math.floor(diff) + 1                  # the technique level that makes it certain
+                full_at[o["technique"]] = max(full_at.get(o["technique"], 0), need)
             dmg = max(1, math.floor(o["damage"] * (1 + t("PercentDamageTaken"))))
-            obs.append((iv, p, dmg))
+            obs.append((iv, p, dmg, min(1, repeat + met["RepeatFailedObstacleChance"]),
+                        min(1, skip + met["SkipObstacleChance"])))
+            reward_qty.append(met["FlatObstacleRewardQuantity"])
 
-        def per_lap(cost):
-            """Expected total of a per-attempt cost over one lap, failures and restarts included."""
+        def per_lap(cost, only=None):
+            """Expected total of a per-attempt cost over one lap, failures and restarts included.
+            Obstacle k: X_k = (1 - s_k)(c_k + (1 - p_k)(1 - r_k) E_{k-1}) / (1 - (1 - s_k)(1 - p_k))."""
             total = 0.0
-            for k, (iv, p, dmg) in enumerate(obs):
-                s_k = skip if k > 0 else 0.0
-                x = (1 - s_k) * (cost(iv, p, dmg) + (1 - p) * (1 - repeat) * total) / (1 - (1 - s_k) * (1 - p))
+            for k, (iv, p, dmg, r_k, s_k) in enumerate(obs):
+                s_k = s_k if k > 0 else 0.0
+                c = cost(iv, p, dmg) if only is None or only == k else 0.0
+                x = (1 - s_k) * (c + (1 - p) * (1 - r_k) * total) / (1 - (1 - s_k) * (1 - p))
                 total += x
             return total
 
         ms = per_lap(lambda iv, p, d: iv)
-        fails = per_lap(lambda iv, p, d: 1 - p)
-        hits = per_lap(lambda iv, p, d: (1 - p) * d)
-        success = math.prod(p for _, p, _ in obs)
-        restarts = fails * (1 - repeat)
+        fails_at = [per_lap(lambda iv, p, d: 1 - p, only=k) for k in range(len(obs))]
+        fails = sum(fails_at)
+        success = math.prod(o[1] for o in obs)
+        restarts = sum(f * (1 - o[3]) for f, o in zip(fails_at, obs))
         keep_entry = min(1, t("EntryCostPreservationChance"))
         inputs = {i["item"]: i["qty"] * (1 + restarts) * (1 - keep_entry)
                   for i in a["inputs"] if i.get("kind") != "currency"}
@@ -619,20 +684,21 @@ class Rates:
             else:      # the random obstacle reward, collected when you pass that obstacle
                 ch = max(0.0, min(1.0, (o["chance"] + t("FlatObstacleRewardChance"))
                                   * (1 + t("IncreasedObstacleRewardChance"))))
-                q = max(1, int((o["qty"] + t("FlatObstacleRewardQuantity")) * (1 + t("PercentObstacleRewardQuantity"))))
+                q = sum(max(1, int((o["qty"] + t("FlatObstacleRewardQuantity") + extra)
+                                   * (1 + t("PercentObstacleRewardQuantity")))) for extra in reward_qty) / len(reward_qty)
                 outs[o["item"]] = outs.get(o["item"], 0) + ch * q * (1 + dbl)
         notes, risk = [], {}
         if fails > 1e-9:
             food, heal = self.agility_food()
             max_hp = max(10, 10 * self.reqs.level("Hitpoints"))
-            mean_dmg = max(1, round(hits / fails))
-            per_fail = thieving_damage(int(mean_dmg), round(avoid, 4), max_hp, heal)
+            mix = tuple(sorted((int(o[2]), round(f / fails, 3)) for f, o in zip(fails_at, obs) if f > 1e-9))
+            per_fail = mixed_damage(mix, round(avoid, 4), max_hp, heal)
             eaten, deaths = per_fail["food"] * fails, per_fail["deaths"] * fails
             if food and eaten > 0:
                 inputs[food] = inputs.get(food, 0) + eaten
             hrs = ms / 3_600_000
             risk = {"food": food, "food_per_completion": eaten, "deaths_per_hr": deaths / hrs if hrs else 0.0,
-                    "damage": max(d for _, _, d in obs), "max_hp": max_hp}
+                    "damage": max(o[2] for o in obs), "max_hp": max_hp}
             if not food:
                 notes.append(f"no food: you die after about {per_fail['fails_to_death']:.0f} failed obstacles")
             elif deaths > 0:
@@ -640,7 +706,23 @@ class Rates:
                              f"you lose a toolbelt item)")
         if raw.get("timed_rewards"):
             notes.append("rewards for fast laps not counted")
-        return dict(ms=ms, xp=self.xp(a), inputs=inputs, outputs=outs, currency=cur,
+        gaps = {k: v for k, v in full_at.items() if levels.get(k, 1) < v}
+        if gaps:
+            def need(k, v):
+                cap = (self.techniques.get(k) or {}).get("LevelCap") or 40
+                if v <= cap:
+                    return f"{cmb_short(k)} {v}"
+                return f"{cmb_short(k)} {cap} (cap: {0.95 ** ((v - cap) / 2):.0%} per obstacle at best)"
+            notes.insert(0, "certain at " + ", ".join(need(k, v) for k, v in sorted(gaps.items())))
+        tech_xp = {}
+        if raw.get("gives_technique_xp") and raw.get("technique_xp"):
+            counts = defaultdict(int)
+            for o in raw["obstacles"]:
+                counts[o["technique"]] += 1
+            primary = max(counts, key=counts.get)
+            for tid in {o["technique"] for o in raw["obstacles"] if o["technique"]}:
+                tech_xp[tid] = max(1.0, raw["technique_xp"] * (1 if tid == primary else 0.25))
+        return dict(ms=ms, xp=self.xp(a), inputs=inputs, outputs=outs, currency=cur, technique_xp=tech_xp,
                     detail=f"{len(obs)} obstacles, {success:.0%} chance of a clean lap, {fails:.2f} fails per lap",
                     note="; ".join(notes) or None, supplies={i for i in inputs if i == risk.get("food")},
                     agility=dict(success=success, fails=fails, **risk))
@@ -789,7 +871,7 @@ def expand(key, rates, best):
             src = best[inp][1]
             if src == "shop":
                 shop[inp] += n * mult
-            elif src == "passive":
+            elif src in ("passive", "bank"):
                 passive[inp] += n * mult
             elif src is None:
                 return inp
@@ -879,7 +961,7 @@ def action_rates(actions, state, bonuses, reqs, calc=None, quests=False):
     return rates, passive_rows, blocked
 
 
-def zero_time_sources(reqs, gold, no_shop=False, passive_rows=(), passive_free=False, rates=None):
+def zero_time_sources(reqs, gold, no_shop=False, passive_rows=(), passive_free=False, rates=None, stock=None):
     """Items obtainable with no active time: shop purchases for gold, and passive produce (Farming, Ranching).
     Passive produce counts for every item with passive_free; otherwise (given `rates`) only for items no active
     action makes, such as herbs, so chains that need them can still be costed."""
@@ -889,6 +971,10 @@ def zero_time_sources(reqs, gold, no_shop=False, passive_rows=(), passive_free=F
         for o in a["outputs"]:
             if passive_free or (rates is not None and o["item"] not in made):
                 sources[o["item"]] = ("passive", 0.0)
+    # what is already in your bank (stock): no time to get, and chain_row charges its sell value instead
+    for item, qty in (stock or {}).items():
+        if qty > 0:
+            sources[item] = ("bank", 0.0)
     if not no_shop:
         for s in load(TABLES / "shop_purchases.json"):
             gp = [c for c in s["costs"]["Currencies"] if c["Currency"] == gold]
@@ -939,11 +1025,19 @@ def chain_row(key, rates, best, sources, item_name, price, gold, state=None, unc
         net[it] += n
         shop_cost += n * sources[it][1]
         shop_rows.append(dict(item=item_name(it), per_hr=n * f, gp_hr=n * sources[it][1] * f))
+    stock_rows, stock_value, stock_hours = [], 0.0, None
     for it, n in passive.items():
         net[it] += n
+        if sources.get(it, ("",))[0] == "bank":
+            have = (state or {}).get("bank", {}).get(it, 0)
+            lasts = have / (n * f) if n > 0 else None
+            stock_rows.append(dict(item=item_name(it), per_hr=n * f, have=have, hours=lasts))
+            stock_value += n * price(it)            # what you could have sold it for instead
+            if lasts is not None:
+                stock_hours = lasts if stock_hours is None else min(stock_hours, lasts)
     sold = sorted(((q * price(it) * f, q * f, item_name(it)) for it, q in net.items()
                    if q > 1e-9 and price(it) > 0), reverse=True)
-    sell_value = sum(v for v, _, _ in sold)
+    sell_value = sum(v for v, _, _ in sold) - stock_value * f
     own_xp = (sum(r["xp_split"].values()) * steps[key] * f if r["skill"] == "Combat"
               else xp_by_skill.get(r["skill"], 0.0))
     return dict(
@@ -952,7 +1046,7 @@ def chain_row(key, rates, best, sources, item_name, price, gold, state=None, unc
         gp_hr=sell_value + coins * f - shop_cost * f, sell_hr=sell_value, coins_hr=coins * f,
         shop_hr=shop_cost * f, other_currencies=dict(other_cur),
         sold=[dict(gp_hr=v, per_hr=q, item=n) for v, q, n in sold],
-        steps=step_rows, shop=shop_rows,
+        steps=step_rows, shop=shop_rows, stock=stock_rows, stock_hours=stock_hours,
         passive=[dict(item=item_name(it), per_hr=n * f) for it, n in passive.items()],
         final_share=steps[key] * r["ms"] / total_ms, per_hr=steps[key] * f,
         seconds_each=r["ms"] / 1000, detail=r["detail"], note=r.get("note"), combat=r.get("combat"),

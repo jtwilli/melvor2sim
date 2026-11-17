@@ -18,6 +18,7 @@ HOUR = 3_600_000
 SCAN_KILLS = 60
 RELOAD_AFTER_S = 120
 PASSIVE_NOTE = " Farming and Ranching produce that no other action makes (herbs, for example) is counted as free: it grows on its own."
+MIN_STOCK_HOURS = 1.0           # bank stock is used for a chain only if it lasts at least this long
 COMPARE_BUDGET_MS = 1_800_000   # simulated fight time per target and stance in the Compare tab (30 min)
 
 
@@ -315,26 +316,21 @@ class GameViews:
         pl.reqs.state = w.state                      # the planner moves these while it steps through levels
         pl.rates.state, pl.rates.reqs = w.state, pl.reqs
         rates, passive, _ = calc.action_rates(pl.actions, w.state, w.bonuses, pl.reqs, pl.rates)
-        sources = calc.zero_time_sources(pl.reqs, gold, passive_rows=passive, rates=rates)
-        best = calc.solve_chains(rates, sources)
-        if calc.drop_unsourced_supplies(rates, best):
-            best = calc.solve_chains(rates, sources)
-        rows = []
-        for key in rates:
-            if rates[key].get("converter"):
-                continue
-            row, missing = calc.chain_row(key, rates, best, sources, w.name, w.price, gold)
-            if row:
-                rows.append(row)
+        use_bank = bool(p.get("use_bank", True))
+        rows = list(self._chain_rows(rates, passive, use_bank=use_bank)[0].values())
         chain = lambda r: " > ".join(s["name"] for s in r["steps"]) if len(r["steps"]) > 1 else "-"
+        stock = lambda r: (", ".join(f"{s['item']}" for s in r.get("stock") or [])
+                           + (f" (lasts {hrs(r['stock_hours'])})" if r.get("stock_hours") else "")) or "-"
         levels = {k: v["level"] for k, v in w.state["skills"].items()}
         tables, skill = [], p.get("skill")
         if skill:
             mine = sorted((r for r in rows if r["skill"] == skill), key=lambda r: -r[metric])[:12]
             tables.append({
                 "title": f"{skill} (level {levels.get(skill, 1)}): top actions by {'GP' if by_gp else 'XP'} per hour",
-                "columns": [col("Action"), col("XP / hr", True), col("All-skill XP / hr", True), col("GP / hr", True), col("Chain")],
-                "rows": [[r["name"], num(r["xp_hr"]), num(r["xp_total_hr"]), num(r["gp_hr"]), chain(r)] for r in mine]})
+                "columns": [col("Action"), col("XP / hr", True), col("All-skill XP / hr", True), col("GP / hr", True), col("Chain"),
+                            col("From your bank")],
+                "rows": [[r["name"], num(r["xp_hr"]), num(r["xp_total_hr"]), num(r["gp_hr"]), chain(r), stock(r)]
+                         for r in mine]})
         else:
             tops = {}
             for r in rows:
@@ -344,9 +340,10 @@ class GameViews:
             tables.append({
                 "title": f"Best action per skill by {'GP' if by_gp else 'XP'} per hour",
                 "note": "Counts the time to gather and craft every ingredient from nothing." + PASSIVE_NOTE,
-                "columns": [col("Skill"), col("Lvl", True), col("Do this"), col("XP / hr", True), col("GP / hr", True), col("Chain")],
-                "rows": [[r["skill"], str(levels.get(r["skill"], 1)), r["name"], num(r["xp_hr"]), num(r["gp_hr"]), chain(r)]
-                         for r in ordered]})
+                "columns": [col("Skill"), col("Lvl", True), col("Do this"), col("XP / hr", True), col("GP / hr", True), col("Chain"),
+                            col("From your bank")],
+                "rows": [[r["skill"], str(levels.get(r["skill"], 1)), r["name"], num(r["xp_hr"]), num(r["gp_hr"]), chain(r),
+                          stock(r)] for r in ordered]})
         banners = []
         if p.get("combat"):
             lo = self._setup(p.get("loadout"))
@@ -368,7 +365,39 @@ class GameViews:
                               num(s["gp_hr"] - sum(u["gp_hr"] for u in s["uses"])),
                               ", ".join(f"{k} {num(v)}" for k, v in sorted(s["xp_hr"].items(), key=lambda kv: -kv[1]))]
                              for s in summ]})
+        if use_bank:
+            banners.insert(0, {"kind": "ok", "text": "Ingredients already in your bank are used first (charged at their "
+                                                     "sell price, as you could have sold them) when the stock lasts at "
+                                                     f"least {MIN_STOCK_HOURS:g} h; otherwise they are gathered from nothing."})
         return {"title": "Best XP and gold per hour", "kpis": [], "banners": banners, "tables": tables}
+
+    def _chain_rows(self, rates, passive, no_shop=False, use_bank=True):
+        """key -> chain_row for every action. With use_bank, each chain takes what it needs from your bank when
+        that stock lasts at least MIN_STOCK_HOURS of the chain; otherwise it gathers from nothing.
+        Returns (rows, sources, best) for the bank-using solve (or the plain one)."""
+        w, pl = self.w, self.w.planner
+        gold = NS + "GoldPieces"
+        plain_src = calc.zero_time_sources(pl.reqs, gold, no_shop, passive, rates=rates)
+        plain = calc.solve_chains(rates, plain_src)
+        if calc.drop_unsourced_supplies(rates, plain):
+            plain = calc.solve_chains(rates, plain_src)
+        stock_src = calc.zero_time_sources(pl.reqs, gold, no_shop, passive, rates=rates,
+                                           stock=w.state.get("bank") if use_bank else None)
+        stocked = calc.solve_chains(rates, stock_src) if use_bank else plain
+        rows = {}
+        for key, r in rates.items():
+            if r.get("converter"):
+                continue
+            row = None
+            if use_bank:
+                row, _ = calc.chain_row(key, rates, stocked, stock_src, w.name, w.price, gold, w.state)
+                if row and row["stock_hours"] is not None and row["stock_hours"] < MIN_STOCK_HOURS:
+                    row = None
+            if row is None:
+                row, _ = calc.chain_row(key, rates, plain, plain_src, w.name, w.price, gold, w.state)
+            if row:
+                rows[key] = row
+        return rows, (stock_src if use_bank else plain_src), stocked
 
     # ------------------------------------------------------------ look ahead
     def ahead(self, p):
@@ -380,8 +409,10 @@ class GameViews:
                                       int(p.get("stealth") or 0))
         thieving = skill == "Thieving"
         risky = skill in ("Thieving", "Agility")       # failures that hurt, and food to heal them
-        cols = [col("Lvl", True), col("Action"), col("Status"), col(f"XP / hr at unlock", True),
-                col(f"XP / hr at {r['up_to']}", True), col("GP / hr", True)]
+        agility = skill == "Agility"
+        cols = [col("Lvl", True), col("Action"), col("Status"),
+                col("XP / hr, your techniques" if agility else "XP / hr at unlock", True),
+                col("XP / hr, techniques maxed" if agility else f"XP / hr at {r['up_to']}", True), col("GP / hr", True)]
         if risky:
             cols += [col("Success", True), col("Food / hr", True), col("Risk")]
         cols.append(col("Notes"))
@@ -407,7 +438,8 @@ class GameViews:
             src = last or first
             chain = " > ".join(dict.fromkeys(src["chain"][:-1])) if src and len(src["chain"]) > 1 else ""
             label = "food from: " if risky else "chain: "
-            row.append(label + chain if chain else "-")
+            note = (first or {}).get("note") if agility else None
+            row.append("; ".join(x for x in (note, label + chain if chain else "") if x) or "-")
             rows.append(row)
         banners = []
         if skill == "Agility":
@@ -417,8 +449,10 @@ class GameViews:
                                      "time.") if r["food"] else
                                     "No Agility food is set, so failed obstacles will eventually kill you. Pick a food."})
             banners.append({"kind": "warn", "text": "Obstacle success depends on your technique levels (Climbing, Jumping, "
-                                                    "...), not your Agility level. They are kept at today's levels here, "
-                                                    "so courses get better than shown as you run them."})
+                                                    "...), not your Agility level. 'Your techniques' uses today's levels; "
+                                                    "'techniques maxed' assumes each at its cap (40). Each course gives "
+                                                    "technique XP per lap, so the Levelling planner raises them as it goes. "
+                                                    "The Notes column says which technique levels make a course certain."})
         if thieving:
             banners.append({"kind": "ok" if r["food"] else "bad",
                             "text": (f"Thieving eats {r['food']} when a failure drops you to the auto-eat point; its fishing and "

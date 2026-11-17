@@ -197,9 +197,20 @@ conditions or scaling.
 - XP, completion rewards and technique XP come once per lap. One random obstacle reward is rolled per lap
   (chance `clamp((c + flat) × (1 + increased))`, quantity `max(1, int((q + flat) × (1 + %)))`, maybe doubled);
   the calculator counts it in full (a failure before reaching that obstacle can lose it).
-- Damage and food use the Thieving model below, with the failures' average damage and the Agility food slot.
-- Simplified: technique levels stay at your current ones (they rise as you run courses), technique bonuses for
-  meeting an obstacle's difficulty are not added, and rewards for fast laps (3 courses) are left out.
+- Difficulty met: for each obstacle, every technique whose level is at least the obstacle's difficulty adds its
+  bonus to that obstacle: Climbing +20% retry after a failure, Jumping +1 obstacle reward, Evading −8% interval,
+  Balancing +15% trap success, Rappelling +10% chance to skip it.
+- Retry and skip are per obstacle, so the lap recursion uses each obstacle's own r and s.
+- Damage and food use the Thieving model below, with each failure's damage drawn from the obstacle that failed
+  (weighted by its expected failures per lap), and the Agility food slot.
+- Techniques: every lap of a course that gives technique XP adds the path's technique XP to its main technique
+  (the one most of its obstacles use) and a quarter of it (at least 1) to each other technique on the path.
+  Technique XP for level L = `floor((L² − L + 600 × (2^(L/3.25) − 2^(1/3.25)) / (2^(1/3.25) − 1)) / 6)`, cap 40.
+  An obstacle is certain once the technique level is above its difficulty; difficulties up to 41 mean a few
+  obstacles stay at 95% even at the cap.
+- The levelling planner adds technique XP as it goes and re-plans part-way through a level when a technique would
+  gain two or more levels. The look-ahead shows your current techniques and all techniques at the cap.
+- Not counted: rewards for fast laps (3 courses). No obstacle has a shortcut in this version of the game.
 
 ## Astrology
 
@@ -208,6 +219,14 @@ conditions or scaling.
   with chance `clamp(chance × (1 + PercentEventChance) + FlatEventChance)`.
 - Item events give `base + uniform(0, Astrology level × scaling)` items (average used), doubled with the event's
   ItemDoublingChance. Table events pick one of their events by weight. Bonus events (temporary buffs) are not counted.
+
+## Using what is in your bank
+
+- The panel's Best tab (option "Use my bank", on by default) adds every item in your bank as a zero-time source.
+  A chain that takes from it is charged the item's sell price instead (what you could have sold it for), and
+  is only used when the stock lasts at least one hour of that chain; otherwise the chain gathers from nothing.
+- Without it, every ingredient is priced by the active time to gather it, so items you only have through passive
+  Farming or Ranching (e.g. Feathers from ranched chickens) are charged as if hunted or fished.
 
 ## Boosters (the panel's "Boost?" tab)
 
