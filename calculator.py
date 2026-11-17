@@ -81,6 +81,7 @@ class Requirements:
     def __init__(self, state, assume_tools=False):
         self.state = state
         self.assume_tools = assume_tools     # treat "equip X on the toolbelt" as met (for looking ahead)
+        self.assume_unlocks = False          # treat every non-level requirement as met (GP planner)
         self._quest_gates = None
         # category ids repeat across skills (e.g. "Trees" in Woodcutting and Farming)
         self.category_reqs = {}
@@ -98,6 +99,13 @@ class Requirements:
         return self.check(short(r["Type"]), entity, data)
 
     def check(self, kind, entity, data):
+        ok, label = self._check(kind, entity, data)
+        # what-if mode (GP planner): anything besides a skill level counts as met, though it is still named
+        if self.assume_unlocks and ok is not True and kind not in ("Level", "DemoLocked"):
+            return True, label
+        return ok, label
+
+    def _check(self, kind, entity, data):
         if kind == "DemoLocked":
             return False, "demo locked"
         if kind == "Level":
@@ -475,8 +483,23 @@ class Rates:
             outs[s] = outs.get(s, 0) + stone_chance * hits * (1 + dbl)
         if rec.get("BarItem") and t("BarItemChance"):
             outs[rec["BarItem"]] = outs.get(rec["BarItem"], 0) + t("BarItemChance") * (1 + dbl)
-        return dict(ms=iv * hits, xp=self.xp(a) * (1 + shatter), inputs={}, outputs=outs,
+        # a toolbelt item the rock needs and uses up on every hit (the Starfall / Meteorite sightings logs)
+        inputs = {it: hits for it in self.consumed_tool(a, "MiningMineRock")}
+        return dict(ms=iv * hits, xp=self.xp(a) * (1 + shatter), inputs=inputs, outputs=outs,
                     detail=f"{iv}ms x {hits:.2f} hits (break {p:.0%})")
+
+    def consumed_tool(self, a, trigger):
+        """Toolbelt items this action requires that are used up each time `trigger` fires for it."""
+        out = []
+        for r in a["other_requirements"]:
+            if r["type"] != "ToolbeltItemEquipped":
+                continue
+            tb = ((self.items.get(r["Item"]) or {}).get("Capabilities") or {}).get(NS + "Toolbelt") or {}
+            for c in tb.get("ConsumesOn") or []:
+                d = c.get("Data") or {}
+                if short(c["Type"]) == trigger and d.get("Recipe") in (None, a["id"]) and not d.get("Chance"):
+                    out.append(r["Item"])
+        return out
 
     def r_FishingRecipe(self, a):
         t = lambda s, i=None: self.b.total(a, s, i)
@@ -1015,7 +1038,7 @@ def chain_row(key, rates, best, sources, item_name, price, gold, state=None, unc
         makes = sorted(((q * c * f, item_name(it)) for it, q in sr["outputs"].items() if q * c * f >= 0.05),
                        reverse=True)
         step_rows.append(dict(
-            name=sr["name"], skill=sr["skill"], final=k == key, per_hr=c * f,
+            key=k, name=sr["name"], skill=sr["skill"], final=k == key, per_hr=c * f,
             share=c * sr["ms"] / total_ms, secs_each=sr["ms"] / 1000,
             xp_hr={sk: v * c * f for sk, v in sr["xp_split"].items()},
             uses=[(n * c * f, item_name(it)) for it, n in sr["inputs"].items() if n > 0],
@@ -1047,7 +1070,8 @@ def chain_row(key, rates, best, sources, item_name, price, gold, state=None, unc
         shop_hr=shop_cost * f, other_currencies=dict(other_cur),
         sold=[dict(gp_hr=v, per_hr=q, item=n) for v, q, n in sold],
         steps=step_rows, shop=shop_rows, stock=stock_rows, stock_hours=stock_hours,
-        passive=[dict(item=item_name(it), per_hr=n * f) for it, n in passive.items()],
+        passive=[dict(id=it, item=item_name(it), per_hr=n * f, src=sources.get(it, ("",))[0])
+                 for it, n in passive.items()],
         final_share=steps[key] * r["ms"] / total_ms, per_hr=steps[key] * f,
         seconds_each=r["ms"] / 1000, detail=r["detail"], note=r.get("note"), combat=r.get("combat"),
         loadout=r.get("loadout"), recorded=recorded(state, r) if state else None,

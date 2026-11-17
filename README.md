@@ -8,8 +8,9 @@ levels, your equipment, your upgrades, your mastery and every other bonus you ha
 active. You can use it three ways:
 
 1. **An XP button inside the game.** It opens a panel over the game with every
-   tool in tabs: best XP and gold, a levelling planner, production per hour, every way
-   to boost a skill, a loadout comparison and a drop-chance calculator. See
+   tool in tabs: best XP and gold, a levelling planner, gold planners for skilling and
+   combat (what pays more once you unlock it), production per hour, every way to boost
+   a skill, a loadout comparison and a drop-chance calculator. See
    [The in-game panel](#the-in-game-panel).
 2. **A report**: an HTML page you open in your browser. It ranks the best XP/hour
    and GP/hour for every skill you can train right now, plus combat for each of
@@ -281,6 +282,44 @@ while, and **Open in browser** opens the browser pages.
   - **Extra stealth** (Thieving): test gear or ranks you don't have yet.
   - **Loadout** (combat skills): which saved loadout to fight with.
 
+**GP planner**
+
+- The ten best **self-sufficient** ways to make gold that you **can't do yet**:
+  everything is gathered or crafted by you (nothing bought, nothing from your
+  bank) and the product is sold. Combat isn't included.
+- **Within 10 / 20 / 30 / 40 / 50 levels / Any level:** only methods whose
+  levels are all within that many of yours.
+- A method is "locked" if any step of its chain needs a higher level, or something
+  else: a toolbelt item, a shop unlock, an Astrology node, a mastery rank, or a
+  "do X first" count (for example, complete Dense Cave Trail 50 times before
+  Dense Coal can be mined). Those counts are followed through, so the hidden
+  levels behind them (Agility 80 for that course) are included.
+- Each method is costed at the levels it unlocks at. It shows GP/hour, the change
+  against your best self-sufficient method today, the levels needed (and how many
+  levels away each is), anything else needed, and the chain.
+- A second table says how to get each non-level unlock: where an item drops, its
+  shop price, or the Astrology sighting that gives it.
+- **Count farming as free:** off by default, because Farming and Ranching grow at
+  their own pace. Tick it to include methods that need herbs or dragonscales.
+  The table then shows how many plots or animals the method needs.
+
+**Combat GP**
+
+- The richest enemies to farm for their drops, and the **gear tier** each style
+  (melee, ranged, magic) needs to farm them: the lowest level where you don't die
+  and still make gold.
+- A tier is a level with the best standard gear you can make for that style at
+  that level: Smithing for melee, Crafting and Fletching for ranged, Runecrafting
+  for magic. A second table lists each tier's weapon, stance, armour and the
+  crafting levels needed to make it.
+- GP/hour is loot and coins less the food, ammo and runes the fight uses, all at
+  their sell price, so ranged and magic often pay less than they first appear to.
+- **Within 10 / 20 / ... levels / Any level:** only tiers within that many levels
+  of yours. "(now)" marks a tier your levels already reach. **Area needs** lists
+  what opens the area (a quest, a slayer permit).
+- The first run simulates about 450 fights (about half a minute); after that,
+  changing the window is instant until the save reloads.
+
 **Production**
 
 - Pick any item to see the fastest way to make it per hour, every other way ranked
@@ -549,6 +588,12 @@ If you have several characters, use `--save` to choose one.
   eat, so pick a cheap food in the planner.
 - **Astrology** counts the sighting logs from events. Temporary bonus events
   (moons, auroras) aren't counted.
+- **Fallen stars and meteorites** use up a sightings log on every hit, and the
+  logs only come from rare Astrology sightings. Mining them includes the study
+  time to find the logs (or uses the logs already on your toolbelt).
+- **The GP planners** don't count the time to meet non-level unlocks (course
+  laps, potions made first, gold for shop unlocks). Combat GP uses standard
+  crafted gear only, without prayers or jewellery.
 - **Not modelled:** Firemaking bonfires (a timed buff), Thieving distractions,
   and the chance to find pets. Pets you've already found are applied.
 - **Sell prices** are the game's fixed prices.
@@ -591,6 +636,7 @@ If the in-game panel stops appearing after an update, run
 | `planner.py` | Levelling routes and look-ahead |
 | `sim_server.py` | Local server for the browser pages and the in-game panel |
 | `game_api.py` | What each panel tab shows, ready to draw |
+| `combat_gp.py` | Gear tiers per combat style and the gold each enemy pays at each (the Combat GP tab) |
 | `boosters.py` | Finds every booster for a skill and how to get it (the Boost? tab) |
 | `sim.html`, `planner.html` | The combat simulator and levelling planner pages |
 | `install_mod.py` | Installs, checks or removes the in-game panel |

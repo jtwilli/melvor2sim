@@ -5,6 +5,7 @@ extends CanvasLayer
 
 const DIR := "user://melvor2sim"
 const TABS := [["best", "Best XP / GP", "tab_best.gd"], ["plan", "Levelling planner", "tab_plan.gd"],
+	["gp", "GP planner", "tab_gp.gd"], ["cgp", "Combat GP", "tab_cgp.gd"],
 	["produce", "Production", "tab_produce.gd"], ["boost", "Boost?", "tab_boost.gd"],
 	["compare", "Compare loadouts", "tab_compare.gd"],
 	["math", "Maths", "tab_math.gd"]]

@@ -104,6 +104,8 @@ class Boosters:
                 for x in tb["Table"]:
                     self.dropped_by[x["Item"]].append((eid, tb["Chance"] * x["Weight"] / tw,
                                                        (x["MinQuantity"] + x["MaxQuantity"]) / 2))
+        ev = calc.TABLES / "astrology_events.json"
+        self.astro_events = calc.load(ev) if ev.exists() else {}
         self.opened_from = defaultdict(list)             # item -> [(container item, chance)]
         for iid, it in world.items.items():
             cap = (it.get("Capabilities") or {}).get(NS + "Openable")
@@ -270,6 +272,8 @@ class Boosters:
         # combat drops, timed with the chosen loadout
         for eid, p, qty in self.dropped_by.get(iid, []):
             ways.append(self._combat_way(eid, iid, p, qty))
+        # Astrology: item events (sightings) rolled on each study
+        ways += self._astro_ways(iid)
         # shop
         for s in self.shop.values():
             if any(x["Item"] == iid for x in s["provides_items"]):
@@ -297,6 +301,58 @@ class Boosters:
                 ways.append(dict(text=f"quest reward: {self.name(qid)}" + (" (done)" if done else ""),
                                  needs=[] if done else [f"quest {self.name(qid)}"], met=not done, level=0, hours=None))
         return ways
+
+    def _astro_ways(self, iid):
+        level = self.w.state["skills"].get("Astrology", {}).get("level", 1)
+
+        def walk(eid, chance, depth=0):
+            e = self.astro_events.get(eid)
+            if not e or depth > 4:
+                return 0.0, 0.0
+            if e["kind"] == "AstrologyItemEvent":
+                return (chance, e["BaseQuantity"] + level * e["LevelScalingQuantity"] / 2) if e["Item"] == iid else (0.0, 0.0)
+            p, q = 0.0, 0.0
+            if e["kind"] == "AstrologyTableEvent":
+                tw = sum(x["Weight"] for x in e.get("Events") or []) or 1
+                for x in e.get("Events") or []:
+                    pp, qq = walk(x["Event"], chance * x["Weight"] / tw, depth + 1)
+                    p, q = p + pp, max(q, qq)
+            return p, q
+
+        cons, hits = [], []
+        for a in self.actions:
+            if a["type"] != "AstrologyConstellation" or a["demo_locked"]:
+                continue
+            cons.append(a)
+            p, q = 0.0, 0.0
+            for eid in (a.get("raw_extra") or {}).get("events") or []:
+                e = self.astro_events.get(eid)
+                if e:
+                    pp, qq = walk(eid, e["Chance"])
+                    p, q = p + pp, max(q, qq)
+            if p > 0:
+                hits.append((a, p, q))
+        if not hits:
+            return []
+        every = len(hits) == len(cons) and len({round(p, 12) for _, p, _ in hits}) == 1
+        out = []
+        for a, p, q in ([min(hits, key=lambda h: h[0]["level_req"] or 1)] if every else hits[:4]):
+            ok, missing, unknown = self.reqs.action(a)
+            where = "any constellation" if every else a["name"]
+            out.append(dict(text=f"Astrology: {where}, {self._chance(p)} per study (about {q:,.0f} each)",
+                            needs=missing + [u + "?" for u in unknown], met=ok, level=a["level_req"] or 1, hours=None))
+        return out
+
+    def where_from(self, iid):
+        """Every way to get an item, untimed (no fights simulated): for the GP planner."""
+        self.reqs = calc.Requirements(self.w.state)
+        self.rates, self.best_chain, self.gp_hr, self.setup, self._fights = {}, {}, 0.0, None, {}
+        return self._item_ways(iid)
+
+    def shop_way(self, pid):
+        self.reqs = calc.Requirements(self.w.state)
+        self.best_chain, self.gp_hr = {}, 0.0
+        return self._shop_way(pid)
 
     def _combat_way(self, eid, iid, p, qty):
         e = self.enemies.get(eid) or {}

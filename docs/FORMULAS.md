@@ -51,6 +51,10 @@ Stat names below match `stat` in `bonus_sources.json` / `active_bonuses.json`.
   Example: Copper Ore, p = 0.3 → 2.53 hits × 1500 ms ≈ 3.8 s per ore.
 - Ore and XP are granted on break. `ShatterChance` triples the ore and doubles XP;
   `AdditionalProductQuantityChance` adds 1; `BarItemChance` can also give the bar.
+- Fallen Star, Golden Fallen Star and Meteorite Ore need a sightings log on the toolbelt, and the log is used up
+  on **every hit** (its `ConsumesOn` trigger is `MiningMineRock` for that rock, which fires per hit). The log is
+  counted as an input of `hits` per ore. Logs come only from Astrology sightings (Starfall 1 in 500 studies,
+  Golden Starfall 1 in 50,000, Meteor Shower 1 in 20,000), so the chain includes that study time.
 
 ## Fishing (verified loop; interval modifiers not yet confirmed)
 
@@ -225,6 +229,7 @@ conditions or scaling.
 - The panel's Best tab (option "Use my bank", on by default) adds every item in your bank as a zero-time source.
   A chain that takes from it is charged the item's sell price instead (what you could have sold it for), and
   is only used when the stock lasts at least one hour of that chain; otherwise the chain gathers from nothing.
+- Used-up items on your toolbelts (the sightings logs) count as stock too; tools you keep never do.
 - Without it, every ingredient is priced by the active time to gather it, so items you only have through passive
   Farming or Ranching (e.g. Feathers from ranched chickens) are charged as if hunted or fished.
 
@@ -240,6 +245,36 @@ conditions or scaling.
     time;
   - pet: `ScaleFactor` XP (the average XP per pet) ÷ your best XP per hour in that skill.
 - For drops, "90% within" uses `ln(10) / p` tries (a geometric wait), i.e. about 2.3 × the average time.
+
+## GP planner (the panel's "GP planner" tab)
+
+- Chains are solved with no shop and no bank (self-sufficient), selling the product. Farming and Ranching
+  produce is left out unless "Count farming as free" is ticked; then the plots or animals needed are
+  `use per hour ÷ (yield per harvest × 3,600,000 / grow interval)`, ignoring bonuses.
+- Candidates: every action is solved with all skills at `min(99, yours + window)` and every non-level
+  requirement treated as met. An action counts as locked if any step of its chain needs a higher level or any
+  other unmet requirement today. A "do X first" requirement is followed to the action it names (the course, the
+  item's recipe, the constellation that rolls the event), up to three deep, and that action's levels are added.
+- The best 30 within the window are then re-solved with only the levels they need raised, which gives the GP/hour
+  shown. Methods no better than what the same action makes today are dropped. The time to meet the non-level
+  requirements (laps, potions made, gold for shop unlocks) is not counted.
+
+## Combat GP (the panel's "Combat GP" tab)
+
+- Gear: only items made by Smithing, Fletching, Crafting or Runecrafting whose requirements are skill levels. A
+  weapon's style is its weapon type's first stance's style. Armour belongs to melee if it needs only Defence, and to
+  ranged or magic if it needs Defence and Ranged or Magic. Ammo must match the weapon's `RequiredAmmoType`.
+- Tier L: in each armour slot, the highest-requirement piece at most L (ties broken by the sum of its positive
+  stats); the best ammo at most L; and for the weapon, each weapon type's best piece at most L, each tried in every
+  stance against the richest enemy (15 kills). The fastest kill picks the weapon and stance. A two-handed weapon
+  drops the off-hand. No prayers, rings, amulets or capes.
+- Levels: the style's skills, Defence and Hitpoints are set to `max(yours, L)`; your bonuses and food are kept,
+  with unlimited food. Area unlock requirements are not enforced in the simulation; they are listed instead.
+- Enemies: every enemy is scanned at tier 99 in each style (15 kills); the 15 with the most gold per hour are
+  simulated at tiers 99, 90, ..., 10 (30 kills each), top down, stopping after two tiers in a row where you die.
+- `GP / hr = kills/hr × (Σ drop qty × sell price + coins − Σ supplies used × sell price)`. "From" is the lowest
+  tier that is safe (survival verdict not "death") with GP / hr > 0. Within a window W, a style may use tiers up to
+  `your tier + W`, where your tier is the lowest of that style's skills, Defence and Hitpoints.
 
 ## Levels and the levelling planner
 

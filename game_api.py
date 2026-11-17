@@ -6,11 +6,13 @@ comes back. Every view has the same shape, with all numbers already formatted as
     {"title": str, "kpis": [{"v": str, "l": str}], "banners": [{"kind": "bad|warn|ok", "text": str}],
      "tables": [{"title": str, "note": str, "columns": [{"label": str, "num": bool}], "rows": [[str, ...]]}]}
 """
+import re
 import time
 
 import calculator as calc
 import combat as cmb
 import boosters as boost_mod
+import combat_gp as cgp_mod
 import planner as plan_mod
 
 NS = cmb.NS
@@ -291,7 +293,8 @@ class GameViews:
 
     def view(self, name, params):
         fn = {"best": self.best, "plan": self.plan, "combat": self.combat, "ahead": self.ahead,
-              "produce": self.produce, "produce_items": self.produce_items, "boost": self.boost}.get(name)
+              "produce": self.produce, "produce_items": self.produce_items, "boost": self.boost,
+              "gp_plan": self.gp_plan, "combat_gp": self.combat_gp}.get(name)
         if not fn:
             return {"title": "", "banners": [{"kind": "bad", "text": f"Unknown view {name!r}"}], "kpis": [], "tables": []}
         try:
@@ -381,8 +384,16 @@ class GameViews:
         plain = calc.solve_chains(rates, plain_src)
         if calc.drop_unsourced_supplies(rates, plain):
             plain = calc.solve_chains(rates, plain_src)
+        # your bank, plus what is on your toolbelts (sightings logs are used up from there)
+        stock = dict(w.state.get("bank") or {})
+        for slots in (w.state.get("toolbelts") or {}).values():
+            for sl in slots.values():
+                tb = ((w.items.get(sl["item"]) or {}).get("Capabilities") or {}).get(NS + "Toolbelt") or {}
+                if tb.get("ConsumesOn"):             # used-up items only, never a tool you keep
+                    stock[sl["item"]] = stock.get(sl["item"], 0) + sl.get("qty", 0)
+        st = dict(w.state, bank=stock)
         stock_src = calc.zero_time_sources(pl.reqs, gold, no_shop, passive, rates=rates,
-                                           stock=w.state.get("bank") if use_bank else None)
+                                           stock=stock if use_bank else None)
         stocked = calc.solve_chains(rates, stock_src) if use_bank else plain
         rows = {}
         for key, r in rates.items():
@@ -390,7 +401,7 @@ class GameViews:
                 continue
             row = None
             if use_bank:
-                row, _ = calc.chain_row(key, rates, stocked, stock_src, w.name, w.price, gold, w.state)
+                row, _ = calc.chain_row(key, rates, stocked, stock_src, w.name, w.price, gold, st)
                 if row and row["stock_hours"] is not None and row["stock_hours"] < MIN_STOCK_HOURS:
                     row = None
             if row is None:
@@ -475,6 +486,328 @@ class GameViews:
                             "note": "Costed from a standing start: gathering and crafting the inputs is included. "
                                     "Tools a location needs are assumed equipped; the Status column says which." + PASSIVE_NOTE,
                             "columns": cols, "rows": rows}]}
+
+    # ------------------------------------------------------------ GP planner
+    GP_TOP = 10
+    GP_RECHECK = 30                        # candidates re-costed at the exact levels they unlock at
+
+    def _level_needs(self, a):
+        """skill -> level an action needs (its own skill, plus Level requirements on it and its category)."""
+        need = {}
+
+        def put(sk, lv):
+            if sk and lv:
+                need[sk] = max(need.get(sk, 0), int(lv))
+        put(a["skill"], a["level_req"])
+        for r in a["other_requirements"]:
+            if r["type"] == "Level":
+                put(r.get("entity"), r.get("Level"))
+        table = calc.CATEGORY_TABLE.get(a["skill"], "RecipeCategory")
+        for r in self.w.planner.reqs.category_reqs.get(table, {}).get(a["category"], []):
+            if calc.short(r["Type"]) == "Level":
+                d = r.get("Data") or {}
+                put(calc.short((d.get("Component") or {}).get("Entity")), d.get("Level"))
+        return need
+
+    def _gp_solve(self, levels, what_if, passive_free=False):
+        """Self-sufficient chains (nothing bought, nothing from the bank) with these skill levels. With what_if,
+        tools, shop unlocks, Astrology nodes, mastery ranks and 'do X first' counts are all treated as met."""
+        w, pl = self.w, self.w.planner
+        gold = NS + "GoldPieces"
+        st = cmb.with_levels(w.state, levels)
+        pl.reqs.state, pl.reqs.assume_tools, pl.reqs.assume_unlocks = st, what_if, what_if
+        pl.rates.state, pl.rates.reqs = st, pl.reqs
+        try:
+            rates, passive, _ = calc.action_rates(pl.actions, st, w.bonuses, pl.reqs, pl.rates)
+            src = calc.zero_time_sources(pl.reqs, gold, True, passive if passive_free else (), rates=rates)
+            best = calc.solve_chains(rates, src)
+            if calc.drop_unsourced_supplies(rates, best):
+                best = calc.solve_chains(rates, src)
+            rows = {}
+            for key, r in rates.items():
+                if r.get("converter"):
+                    continue
+                row, _ = calc.chain_row(key, rates, best, src, w.name, w.price, gold, st)
+                if row and row["gp_hr"] > 0:
+                    rows[key] = row
+            return rows
+        finally:
+            pl.reqs.state, pl.reqs.assume_tools, pl.reqs.assume_unlocks = w.state, False, False
+            pl.rates.state, pl.rates.reqs = w.state, pl.reqs
+
+    def _gp_prereqs(self, a):
+        """Actions an unmet 'do X first' requirement points at (run a course, make an item, observe an event)."""
+        pl = self.w.planner
+        table = calc.CATEGORY_TABLE.get(a["skill"], "RecipeCategory")
+        raw = [(r["type"], r) for r in a["other_requirements"]]
+        raw += [(calc.short(r["Type"]), r.get("Data") or {}) for r in pl.reqs.category_reqs.get(table, {}).get(a["category"], [])]
+        out = []
+        for kind, d in raw:
+            if not kind.endswith("Statistic") or pl.reqs.check(kind, None, d)[0] is not False:
+                continue
+            stat = calc.short(d.get("Statistic") or "")
+            if d.get("Course"):
+                opts = [x for x in pl.actions if x["type"] == "AgilityCoursePath" and x["id"].startswith(d["Course"])]
+            elif d.get("Event"):
+                opts = [x for x in pl.actions if x["type"] == "AstrologyConstellation"
+                        and d["Event"] in ((x.get("raw_extra") or {}).get("events") or [])]
+            elif d.get("Item") and stat != "BankItemFound":
+                opts = [x for x in pl.actions if any(o["item"] == d["Item"] for o in x["outputs"])]
+            else:
+                opts = []
+            if opts:
+                out.append(min(opts, key=lambda x: max(self._level_needs(x).values(), default=0)))
+        return out
+
+    def _gp_needs(self, row, by_key, cur):
+        """What a chain still needs today: {skill: level} over every step (and whatever a 'do X first'
+        requirement leads to), plus the other unmet requirements."""
+        pl = self.w.planner
+        levels, other, notes, seen = {}, [], [], set()
+        todo = [by_key.get(s.get("key")) for s in row["steps"]]
+        for x in row.get("passive") or []:          # Farming / Ranching produce counted as free
+            if x.get("src") != "passive":
+                continue
+            makers = [a for a in pl.actions if a["type"] in calc.PASSIVE_TYPES
+                      and any(o["item"] == x["id"] for o in a["outputs"])]
+            if makers:
+                m = min(makers, key=lambda a: a["level_req"] or 1)
+                todo.append(m)
+                each = sum(o["expected_qty"] for o in m["outputs"] if o["item"] == x["id"]) * HOUR / (m["interval_ms"] or HOUR)
+                many = f" (about {x['per_hr'] / each:,.0f} {'plots' if m['skill'] == 'Farming' else 'animals'})" if each else ""
+                label = f"{num(x['per_hr'])} {x['item']} / hr from {m['skill']}: {m['name']}{many}"
+                if label not in notes:
+                    notes.append(label)
+        depth = {id(a): 0 for a in todo if a}
+        while todo:
+            a = todo.pop()
+            if not a or a["key"] in seen:
+                continue
+            seen.add(a["key"])
+            for sk, lv in self._level_needs(a).items():
+                if lv > cur.get(sk, 1):
+                    levels[sk] = max(levels.get(sk, 0), lv)
+            _, missing, unknown = pl.reqs.action(a)
+            for m in missing + [u + " (unverified)" for u in unknown]:
+                head, _, tail = m.partition(" ")
+                if (head in cur and tail.isdigit()) or m in other:
+                    continue                          # a skill level: already in `levels`
+                other.append(m)
+            if depth.get(id(a), 0) < 3:
+                for x in self._gp_prereqs(a):
+                    depth[id(x)] = depth.get(id(a), 0) + 1
+                    todo.append(x)
+        return levels, other, notes
+
+    def _gp_boosters(self):
+        if self._boosters is None:
+            self._boosters = boost_mod.Boosters(self.w, self._all_actions())
+        return self._boosters
+
+    def _gp_label(self, m):
+        """A requirement label made readable, and how to get it where that is an item or a shop unlock."""
+        bs = self._gp_boosters()
+        split = lambda s: re.sub(r"(?<=[a-z])(?=[A-Z0-9])", " ", s)
+        how = None
+        if m.startswith("equip "):
+            iid = NS + m[6:]
+            ways = bs.where_from(iid)
+            how = "; ".join(w_["text"] + (f" (needs {', '.join(w_['needs'])})" if w_["needs"] else "")
+                            for w_ in sorted(ways, key=lambda w_: (not w_["met"], w_["level"]))[:2])
+            return f"equip {bs.name(iid)}", how or "no source in the game data"
+        if m.startswith("buy "):
+            pid = NS + m[4:]
+            if pid in bs.shop:
+                s = bs.shop_way(pid)
+                return f"buy {bs.name(pid)}", s["text"] + (f" (needs {', '.join(s['needs'])})" if s["needs"] else "")
+            return split(m), None
+        st = re.match(r"^(\w+) (\w+) ([\d,]+)/([\d,]+)( \(unverified\))?$", m)
+        if st:
+            stat, key, have, need, unv = st.groups()
+            name = bs.name(NS + key)
+            name = split(name) if " " not in name else name
+            so_far = f" ({have} so far)" + (unv or "") if have != "0" else (unv or "")
+            if stat == "BankItemFound":
+                ways = bs.where_from(NS + key)
+                how = "; ".join(w_["text"] for w_ in sorted(ways, key=lambda w_: (not w_["met"], w_["level"]))[:2])
+                return f"find a {name}", how or "no source in the game data"
+            if stat == "AgilityCourseCompleted":
+                return f"complete {name} {need} times{so_far}", "run the Agility course (its levels are included)"
+            if stat.endswith("ItemGained"):
+                return f"make {need} {name} first{so_far}", "make them (their levels are included)"
+            if stat == "AstrologyTimesEventObserved":
+                return f"observe {name}" + (f" {need} times" if need != "1" else "") + so_far,                     "a random event while studying in Astrology"
+            return f"{split(stat).lower()} for {name}: {need}{so_far}", None
+        if m.startswith("finish quest "):
+            return f"finish quest {bs.name(NS + m[13:])}", None
+        if m.startswith("Astrology node "):
+            return f"Astrology node {bs.name(NS + m[15:])}", "unlock it in Astrology"
+        return split(m), None
+
+    def gp_plan(self, p):
+        w, pl = self.w, self.w.planner
+        within = int(p.get("within") or 0)
+        cur = {k: v["level"] for k, v in w.state["skills"].items()}
+        cap = plan_mod.MAX_LEVEL
+        by_key = {a["key"]: a for a in pl.actions}
+        free = bool(p.get("passive"))
+        now = self._gp_solve({}, False, free)
+        best_now = max(now.values(), key=lambda r: r["gp_hr"], default=None)
+        reach = within or cap
+        wide = self._gp_solve({k: min(cap, v + reach) for k, v in cur.items()}, True, free)
+        cands = []
+        for key, row in wide.items():
+            levels, other, _ = self._gp_needs(row, by_key, cur)
+            if not levels and not other:
+                continue                              # nothing locked about it
+            if within and max((lv - cur.get(sk, 1) for sk, lv in levels.items()), default=0) > within:
+                continue                              # a 'do X first' step needs more levels than the window
+            mine = now.get(key)
+            if mine and mine["gp_hr"] >= row["gp_hr"] * 0.99:
+                continue                              # the locked step doesn't make it any better
+            cands.append((row["gp_hr"], key))
+        cands.sort(reverse=True)
+        found, profiles = [], {}
+        for _, key in cands[:self.GP_RECHECK]:
+            levels = self._gp_needs(wide[key], by_key, cur)[0]
+            prof = tuple(sorted(levels.items()))
+            if prof not in profiles:                  # cost it at the levels it unlocks at, not the window's top
+                profiles[prof] = self._gp_solve(dict(prof), True, free)
+            row = profiles[prof].get(key) or wide[key]
+            levels, other, notes = self._gp_needs(row, by_key, cur)
+            if not levels and not other:
+                continue
+            if f_now := now.get(key):
+                if f_now["gp_hr"] >= row["gp_hr"] * 0.99:
+                    continue                          # costed at its unlock levels, it is no better than today
+            gap = max((lv - cur.get(sk, 1) for sk, lv in levels.items()), default=0)
+            if within and gap > within:
+                continue
+            found.append(dict(row=row, levels=levels, other=other, notes=notes, gap=gap, now=now.get(key)))
+        found.sort(key=lambda f: -f["row"]["gp_hr"])
+        top = found[:self.GP_TOP]
+        base = best_now["gp_hr"] if best_now else 0.0
+        rows, unlocks = [], {}
+        for i, f in enumerate(top, 1):
+            r = f["row"]
+            other = []
+            for m in f["other"]:
+                label, how = self._gp_label(m)
+                other.append(label)
+                unlocks.setdefault(label, [how, []])[1].append(str(i))
+            lv = ", ".join(f"{sk} {v} (+{v - cur.get(sk, 1)})"
+                           for sk, v in sorted(f["levels"].items(), key=lambda kv: -(kv[1] - cur.get(kv[0], 1)))) or "-"
+            gain = f"{(r['gp_hr'] / base - 1):+.0%}" if base > 0 else "-"
+            chain = " > ".join(dict.fromkeys(s["name"] for s in r["steps"][:-1])) or "-"
+            rows.append([str(i), r["skill"], r["name"], num(r["gp_hr"]), gain, num(r["xp_hr"]), lv,
+                         ", ".join(other + f["notes"]) or "-", chain])
+        label = f"within {within} levels" if within else "at any level"
+        kpis = []
+        if best_now:
+            kpis.append({"v": num(base), "l": f"Best self-sufficient GP / hr now: {best_now['name']} ({best_now['skill']})"})
+        if top:
+            kpis.append({"v": num(top[0]["row"]["gp_hr"]), "l": f"Best locked {label}: {top[0]['row']['name']}"})
+        kpis.append({"v": str(len(found)), "l": f"Locked methods found {label}" + (" (top checked)" if
+                                                                               len(cands) > self.GP_RECHECK else "")})
+        banners = [{"kind": "ok", "text": "Self-sufficient: every ingredient is gathered or crafted by you (nothing bought, "
+                                          "nothing taken from the bank), and the product is sold. Combat is not included."},
+                   {"kind": "warn", "text": "Each method is costed at the levels it unlocks at; your other skills stay "
+                                            "where they are. 'Also needs' lists tools, shop unlocks, Astrology nodes, "
+                                            "mastery ranks and 'do X first' counts, which are assumed met (the time to "
+                                            "do them is not counted)."}]
+        banners.append({"kind": "warn", "text": "Farming and Ranching produce is counted as free, with no limit on how much "
+                                                "you grow. 'Also needs' says how many plots or animals that takes."} if free else
+                       {"kind": "ok", "text": "Farming and Ranching produce is left out (it grows at its own pace), so "
+                                              "methods that need herbs, dragonscales and the like are not listed. Tick "
+                                              "'Count farming as free' to include them."})
+        if not top:
+            banners.insert(0, {"kind": "warn", "text": f"No locked method {label} beats what it makes today."})
+        return {"title": f"GP planner: locked self-sufficient methods {label}", "kpis": kpis, "banners": banners,
+                "tables": [{"title": f"Top {len(top)} by GP per hour",
+                            "note": "Levels needed covers every step of the chain, with how many levels away each is." +
+                                    PASSIVE_NOTE,
+                            "columns": [col("#"), col("Skill"), col("Method"), col("GP / hr", True), col("vs best now", True),
+                                        col("XP / hr", True), col("Levels needed"), col("Also needs"), col("Chain")],
+                            "rows": rows}] + ([{
+                    "title": "How to unlock them (besides levels)",
+                    "columns": [col("Needs"), col("For #"), col("How to get it")],
+                    "rows": [[k, ", ".join(v[1]), v[0] or "-"] for k, v in unlocks.items()]}] if unlocks else [])}
+
+    # ------------------------------------------------------------ combat GP planner
+    def combat_gp(self, p):
+        """The richest enemies to farm for drops, and the gear tier and level each style needs."""
+        w = self.w
+        if getattr(self, "_cgp", None) is None:
+            self._cgp = cgp_mod.CombatGP(w, self._all_actions())
+        within = int(p.get("within") or 0)
+        food = self._setup(None)["setup"].get("food")
+        data = self._cgp.curves(food)
+        cur = {k: v["level"] for k, v in w.state["skills"].items()}
+        mine = {s: min(cur.get(k, 1) for k in ks) for s, ks in cgp_mod.STYLE_SKILLS.items()}
+        areas = calc.objects("CombatArea")
+        reqs = calc.Requirements(w.state)
+        good = lambda r: r and r["safe"] and r["gp"] > 0
+        found = []
+        for eid, e in data.get("enemies", {}).items():
+            best, froms = None, {}
+            for style, rows in e["styles"].items():
+                ok = sorted(L for L, r in rows.items() if good(r))
+                froms[style] = (ok[0], rows[ok[0]]["gp"]) if ok else None
+                reach = 99 if not within else min(99, mine[style] + within)
+                for L in ok:
+                    if L <= reach and (best is None or rows[L]["gp"] > best[2]["gp"]):
+                        best = (style, L, rows[L])
+            if best:
+                found.append((e, best, froms))
+        found.sort(key=lambda f: -f[1][2]["gp"])
+        rows, used = [], {}
+        for i, (e, (style, L, r), froms) in enumerate(found[:self.GP_TOP], 1):
+            need = []
+            for q in (areas.get(e["area_id"]) or {}).get("UnlockRequirements") or []:
+                ok, label = reqs.check_raw(q)
+                if ok is not True:
+                    need.append(self._gp_label(label)[0] + ("" if ok is False else " (unverified)"))
+            fmt = lambda s: ("-" if not froms.get(s) else
+                             f"{froms[s][0]}{' (now)' if froms[s][0] <= mine[s] else ''}: {num(froms[s][1])}")
+            used[f"{style}|{L}"] = (style, L)
+            rows.append([str(i), e["name"], e["area"], num(r["gp"]), f"{style} {L} ({r['weapon']}, {r['stance']})",
+                         fmt("Melee"), fmt("Ranged"), fmt("Magic"), ", ".join(need) or "-",
+                         ", ".join(f"{n} {num(g)}" for g, n in r["loot"]) or "-"])
+        gear = []
+        for k, (style, L) in sorted(used.items(), key=lambda kv: (kv[1][0], kv[1][1])):
+            t = data["tiers"].get(k)
+            if t:
+                gear.append([f"{style} {L}", f"{t['weapon']} ({t['stance']})" + (f" + {t['ammo']}" if t["ammo"] else ""),
+                             ", ".join(t["armour"]) or "-",
+                             ", ".join(f"{sk} {lv}" for sk, lv in sorted(t["made_with"].items())) or "-"])
+        label = f"within {within} levels" if within else "at any level"
+        kpis = [{"v": f"{mine['Melee']} / {mine['Ranged']} / {mine['Magic']}",
+                 "l": "Your melee / ranged / magic tier (lowest of the style's skills, Defence and Hitpoints)"}]
+        if found:
+            e, (style, L, r), _ = found[0]
+            kpis.append({"v": num(r["gp"]), "l": f"Best {label}: {e['name']} with {style} {L}"})
+        banners = [
+            {"kind": "ok", "text": "A tier is a level L with the best standard gear you can make for that style at L "
+                                   "(Smithing, Fletching, Crafting or Runecrafting): the style's skills, Defence and "
+                                   "Hitpoints at L (or yours, if higher). Your bonuses and food are kept. Prayers, "
+                                   "rings, amulets and capes are left off."},
+            {"kind": "ok", "text": "GP / hr is loot and coins less the food, ammo and runes the fight uses, all at "
+                                   "their sell price. 'From' is the lowest tier where you don't die and still make "
+                                   "gold; it says '(now)' when your levels are already there."},
+            {"kind": "warn", "text": f"Only the {cgp_mod.CANDIDATES} richest enemies are worked out (simulated, so "
+                                     "small differences are noise). The first run takes about half a minute; "
+                                     "after that it is kept until the save reloads."}]
+        if not found:
+            banners.insert(0, {"kind": "warn", "text": f"No enemy pays {label} with standard gear."})
+        tables = [{"title": f"Top {len(rows)} enemies for gold {label}",
+                   "columns": [col("#"), col("Enemy"), col("Area"), col("GP / hr", True), col("Best way"),
+                               col("Melee from"), col("Ranged from"), col("Magic from"), col("Area needs"),
+                               col("Top drops (gp / hr)")],
+                   "rows": rows}]
+        if gear:
+            tables.append({"title": "The gear for each tier used above",
+                           "columns": [col("Tier"), col("Weapon"), col("Armour"), col("Made with")], "rows": gear})
+        return {"title": f"Combat GP planner: {label}", "kpis": kpis, "banners": banners, "tables": tables}
 
     # ------------------------------------------------------------ levelling planner
     def plan(self, p):
