@@ -57,6 +57,8 @@ tr.isblocked td{opacity:.55}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}@media (max-width:700px){.two{grid-template-columns:1fr}}
 .status{font-size:12.5px;color:var(--muted);min-height:18px}
 .gain{color:var(--accent);font-weight:700}.loss{color:var(--warn)}
+.navlink{font-size:13px;font-weight:600;color:var(--accent);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+.navlink:hover{background:var(--chip)}
 </style>
 </head>
 <body>
@@ -65,6 +67,7 @@ tr.isblocked td{opacity:.55}
     <h1>Combat simulator</h1>
     <span class="muted" id="who"></span>
     <span style="flex:1"></span>
+    <a class="navlink" href="/planner">Levelling planner →</a>
     <button id="reload" title="Re-read your save file">Reload save</button>
   </header>
   <div class="grid">
@@ -271,11 +274,15 @@ function renderTargets() {
     `<option value="${esc(m.id)}" ${m.id === S.master ? "selected" : ""}>${esc(m.name)}${m.unlocked ? "" : " (locked)"}${m.auto_slayer ? " — auto-slayer on" : ""}</option>`).join("");
 }
 
-document.querySelectorAll(".tabs .pill").forEach(b => b.onclick = () => {
-  S.kind = b.dataset.kind;
-  document.querySelectorAll(".tabs .pill").forEach(x => x.classList.toggle("on", x === b));
+function showKind() {
+  document.querySelectorAll(".tabs .pill").forEach(x => x.classList.toggle("on", x.dataset.kind === S.kind));
   $("pickEnemy").hidden = S.kind !== "enemy";
   $("pickMaster").hidden = S.kind !== "slayer";
+  history.replaceState(null, "", S.kind === "enemy" ? location.pathname : "#" + S.kind);
+}
+document.querySelectorAll(".tabs .pill").forEach(b => b.onclick = () => {
+  S.kind = b.dataset.kind;
+  showKind();
   schedule();
 });
 $("enemy").onchange = () => { [S.area, S.enemy] = $("enemy").value.split("|"); schedule(); };
@@ -464,10 +471,9 @@ function indexItems() { INIT.slots.forEach(s => s.items.forEach(it => itemById[i
   indexItems();
   $("who").textContent = INIT.character;
   $("ownedOnly").checked = store.get("ownedOnly") === "1";
+  if (location.hash === "#plan") { location.replace("/planner"); return; }
   S = {kind: location.hash === "#slayer" ? "slayer" : "enemy", blocked: {}, setup: null};
-  document.querySelectorAll(".tabs .pill").forEach(x => x.classList.toggle("on", x.dataset.kind === S.kind));
-  $("pickEnemy").hidden = S.kind !== "enemy";
-  $("pickMaster").hidden = S.kind !== "slayer";
+  showKind();
   const worn = INIT.loadouts.find(l => l.worn) || INIT.loadouts[0];
   const recent = Object.entries(INIT.history)[0];
   const area0 = INIT.areas.find(a => a.unlocked) || INIT.areas[0];

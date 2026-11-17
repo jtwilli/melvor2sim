@@ -26,7 +26,7 @@ ROOT = Path(__file__).parent
 TABLES = ROOT / "data" / "tables"
 OUT = ROOT / "data" / "save"
 NS = "MelvorBase:"
-SUPPORTED_VERSION = 28
+SUPPORTED_VERSION = 31
 
 
 def short(i):
@@ -127,8 +127,32 @@ def read_entities(r):
 
 # ---- component decoders ----
 
+LEVEL_CAP = 99
+
+
+def _xp_table(cap=LEVEL_CAP + 1):
+    """XP needed for each level: floor(0.25 * sum(floor(i + 300 * 2^(i/7)))), level 1 = 0."""
+    out, total = [0.0], 0.0
+    for i in range(1, cap):
+        total += math.floor(i + 300 * 2 ** (i / 7))
+        out.append(math.floor(0.25 * total))
+    return out
+
+
+XP_TABLE = _xp_table()
+
+
+def level_from_xp(xp):
+    level = 1
+    while level < LEVEL_CAP and xp >= XP_TABLE[level]:
+        level += 1
+    return level
+
+
 def d_experience(r):
-    return {"xp": r.f64(), "level": r.i32()}
+    # the save stores only the XP; the game works the level out from it (capped at 99)
+    xp = max(0.0, r.f64())
+    return {"xp": xp, "level": level_from_xp(xp)}
 
 
 def d_slots(r, has_occupied=False):
@@ -241,6 +265,33 @@ def d_food(r):
     for _ in range(r.i32()):
         lid = short(r.str())
         out["loadouts"][lid] = r.str()
+    return out
+
+
+def d_pets(r):
+    """pet id -> unlocked (each skill keeps the pets it can find)."""
+    out = {}
+    for _ in range(r.i32()):
+        pid = r.str()
+        out[pid] = r.region().bool()
+    return out
+
+
+def agility_technique_level(xp, cap):
+    """Agility techniques use their own XP curve."""
+    need = lambda lv: math.floor((lv * lv - lv + 600 * ((2 ** (lv / 3.25) - 2 ** (1 / 3.25)) / (2 ** (1 / 3.25) - 1))) / 6)
+    level = 1
+    while level < cap and xp >= need(level + 1):
+        level += 1
+    return level
+
+
+def d_techniques(r):
+    """Agility technique id -> XP."""
+    out = {}
+    for _ in range(r.i32()):
+        tid = r.str()
+        out[tid] = r.region().f64()
     return out
 
 
@@ -408,11 +459,42 @@ def d_statistics(r):
             out[sid] = entries
         return out
 
-    return {"values": values, "items": dict_stats(), "currencies": dict_stats()}
+    out = {"values": values, "items": dict_stats(), "currencies": dict_stats(), "objects": {}}
+    while r.left > 0:      # per-course, per-enemy, per-event ... tables, in the same layout
+        out["objects"].update(dict_stats())
+    return out
 
 
 def d_bait(r):
     return r.str() if r.bool() else None
+
+
+def d_quests(r):
+    """Quest progress: quest id -> {status, steps: [{id, status, tasks: [{id, status, goals: {id: {progress, complete}}}]}]}.
+    Quest status 0 not started, 1 in progress, 3 complete; step and task status 0 not reached, 1 active, 2 done."""
+    out = {}
+    for _ in range(r.i32()):
+        qid = r.str()
+        q = r.region()
+        status, steps = q.i32(), []
+        for _ in range(q.i32()):
+            sid = q.str()
+            s = q.region()
+            tasks = []
+            for _ in range(s.i32()):
+                tid = s.str()
+                t = s.region()
+                goals = {}
+                for _ in range(t.i32()):
+                    gid = t.str()
+                    g = t.region()
+                    goals[gid] = {"progress": g.f64(), "complete": g.bool()}
+                t.bool(); t.bool()
+                tasks.append({"id": tid, "status": t.i32(), "goals": goals})
+            s.bool()
+            steps.append({"id": sid, "status": s.i32(), "tasks": tasks})
+        out[qid] = {"status": status, "steps": steps}
+    return out
 
 
 def try_decode(fn, reader, label, warnings, default=None):
@@ -435,7 +517,7 @@ def parse_save(path):
         warnings.append(f"save version {header['version']} != {SUPPORTED_VERSION}; layouts may have changed")
 
     state = {"save_file": path.name,"header": header, "skills": {}, "toolbelts": {}, "mastery_tasks": {},
-             "value_statistics": {}, "item_statistics": {}}
+             "value_statistics": {}, "item_statistics": {}, "object_statistics": {}}
     for name, comps in entities.items():
         xp = try_decode(d_experience, comps.get("Experience"), f"{name}/Experience", warnings)
         if xp:
@@ -450,6 +532,7 @@ def parse_save(path):
         if st:
             state["value_statistics"].update(st["values"])
             state["item_statistics"].update(st["items"])
+            state["object_statistics"].update(st["objects"])
 
     get = lambda e, c: entities.get(e, {}).get(c)
     tabs = try_decode(d_bank, get("Bank", "Inventory"), "Bank/Inventory", warnings, [])
@@ -471,6 +554,8 @@ def parse_save(path):
     state["prayers"] = try_decode(d_prayer, get("Combat", "Prayer"), "Combat/Prayer", warnings) or {"slots": {}, "loadouts": {}}
     state["spells"] = try_decode(d_spells, get("Combat", "MagicSpells"), "Combat/MagicSpells", warnings) or {"spell": None, "loadouts": {}}
     state["food"] = try_decode(d_food, get("Combat", "Food"), "Combat/Food", warnings) or {"food": None, "loadouts": {}}
+    # Thieving shares your HP with combat but has its own food slot
+    state["thieving_food"] = (try_decode(d_food, get("Thieving", "Food"), "Thieving/Food", warnings) or {}).get("food")
     state["combat_area"] = try_decode(d_areas, get("Combat", "Areas"), "Combat/Areas", warnings) or {}
     pl = get("Combat", "Player")
     state["loadout_stances"] = scan_loadout_stances(pl.buf[pl.pos:pl.end]) if pl else {}
@@ -480,12 +565,30 @@ def parse_save(path):
     state["hunting_journal"] = journal.get("animals", {})
     state["hunting_unique_rare_species_found"] = journal.get("unique_rare_species_found")
     state["fishing_bait"] = try_decode(d_bait, get("Fishing", "BaitComponent"), "Fishing/BaitComponent", warnings)
+    state["quests"] = try_decode(d_quests, get("Quests", "Quests"), "Quests/Quests", warnings, {})
+    pets = {}
+    for name, comps in entities.items():
+        pets.update(try_decode(d_pets, comps.get("Pets"), f"{name}/Pets", warnings, {}))
+    state["pets"] = sorted(p for p, unlocked in pets.items() if unlocked)
+    caps = {NS + t["Id"]: t.get("LevelCap") or 99 for t in _objects_list("AgilityTechnique")}
+    tech = try_decode(d_techniques, get("Agility", "Techniques"), "Agility/Techniques", warnings, {})
+    state["agility_techniques"] = {t: {"xp": xp, "level": agility_technique_level(xp, caps.get(t, 99))}
+                                   for t, xp in tech.items()}
+    state["agility_food"] = (try_decode(d_food, get("Agility", "Food"), "Agility/Food", warnings) or {}).get("food")
     state["components_present"] = {e: {c: rd.end - rd.pos for c, rd in comps.items()} for e, comps in entities.items()}
     state["warnings"] = warnings
     return state
 
 
 # ---- joining the save to the game data ----
+
+def _objects_list(name):
+    path = TABLES / "objects" / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else []
+
+
+STAT_KEYS = ("Item", "Course", "Event", "Enemy", "Species", "Animal", "Master", "Constellation")
+
 
 def condition_met(cond, state):
     """True/False for condition goals the save can answer, None otherwise."""
@@ -496,6 +599,27 @@ def condition_met(cond, state):
     if kind == "ItemStatistic":
         stat = state["item_statistics"].get(data["Statistic"])
         return None if stat is None else stat.get(data["Item"], 0) >= data["Value"]
+    if kind == "ValueStatistic":
+        v = state.get("value_statistics", {}).get(data["Statistic"])
+        return None if v is None else v >= data["Value"]
+    if kind.endswith("Statistic") or kind == "HuntingAnimalSpecies":
+        # per-object statistics: courses, events, animals, slayer masters, enemies, species
+        if "object_statistics" not in state:
+            return None
+        key = next((data[k] for k in STAT_KEYS if data.get(k)), None)
+        table = state["object_statistics"].get(data["Statistic"]) or state["item_statistics"].get(data["Statistic"]) or {}
+        return (table.get(key, 0) if key else sum(table.values())) >= data.get("Value", 1)
+    if kind in ("AstrologyMajorNodeUnlockCount", "AstrologyMinorNodeUnlockCount"):
+        c = state.get("astrology", {}).get(data["Constellation"])
+        nodes = (c or {}).get("major_nodes" if "Major" in kind else "minor_nodes", [])
+        return len(nodes) >= data["Count"]
+    if kind == "PetUnlocked":
+        return data["Pet"] in state.get("pets", [])
+    if kind == "AgilityTechniqueLevel":
+        return (state.get("agility_techniques", {}).get(data["Technique"]) or {}).get("level", 1) >= data["Level"]
+    if kind == "AgilityNumTechniquesLevel":
+        n = sum(1 for t in state.get("agility_techniques", {}).values() if t["level"] >= data["Level"])
+        return n >= data["NumTechniques"]
     if kind == "HuntingMaxLevelAnimals":
         n = sum(1 for e in state["hunting_journal"].values() if e["level"] >= data["Level"])
         return n >= data["Count"]
@@ -601,6 +725,8 @@ def active_bonuses(state, bonuses, ranks_by_skill, objects_dir):
                 add("MasteryGuildBonus", NS + mb["Id"], f"mastery:{skill}",
                     note="UNCERTAIN: rank depends on condition-type tasks the save does not record")
 
+    for pid in state.get("pets", []):
+        add("Pet", pid, "pet")
     for cid, c in state["astrology"].items():
         for node in c["minor_nodes"] + c["major_nodes"]:
             add("AstrologyNode", node, f"astrology:{short(cid)}")

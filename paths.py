@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 CONFIG = ROOT / "config.local.json"
-GAME_DIRS = ("Melvor Idle 2 Demo", "Melvor Idle 2")
+GAME_DIRS = ("Melvor Idle 2",)
 EXE_NAMES = ("Melvor2.exe",)
 SAVE_SUBDIR = Path("Games By Malcs") / "Melvor Idle 2"
 

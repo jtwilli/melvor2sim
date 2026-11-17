@@ -15,8 +15,10 @@ from the gear you have equipped.
 """
 import argparse
 import csv
+import functools
 import json
 import math
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -51,9 +53,32 @@ def objects(name):
 
 # ---------------------------------------------------------------- requirements
 
+QUEST_ACTIVE, QUEST_DONE = 1, 3      # status values in the save (a finished step or task is 2)
+QUEST_GATE_TYPES = ("QuestStepActive", "QuestTaskGoalActive")
+RECIPE_TABLES = ("ArtisanRecipe", "CookingRecipe", "FiremakingRecipe", "FishingRecipe", "MiningRecipe",
+                 "WoodcuttingRecipe")
+
+
+def quest_gates():
+    """(action type, id) -> quest steps that show it. Quest actions have no other requirement: the game
+    lists them while the step is running (they can be repeated then) and removes them when it ends."""
+    out = {}
+    for table in RECIPE_TABLES:
+        path = TABLES / "objects" / f"{table}.json"
+        if not path.exists():
+            continue
+        for oid, o in objects(table).items():
+            gates = [d["Data"] for d in (o.get("DisplayRequirements") or []) if short(d["Type"]) in QUEST_GATE_TYPES]
+            if gates:
+                out[(table, oid)] = gates
+    return out
+
+
 class Requirements:
-    def __init__(self, state):
+    def __init__(self, state, assume_tools=False):
         self.state = state
+        self.assume_tools = assume_tools     # treat "equip X on the toolbelt" as met (for looking ahead)
+        self._quest_gates = None
         # category ids repeat across skills (e.g. "Trees" in Woodcutting and Farming)
         self.category_reqs = {}
         for t in ("RecipeCategory", "FishingLocation", "ThievingLocation", "HuntingLocation",
@@ -79,9 +104,73 @@ class Requirements:
             return self.state["shop_purchases"].get(pid, 0) >= data.get("Amount", 1), f"buy {short(pid)}"
         if kind == "ToolbeltItemEquipped":
             slots = self.state["toolbelts"].get(entity, {})
-            have = any(s["item"] == data["Item"] for s in slots.values())
+            have = self.assume_tools or any(s["item"] == data["Item"] for s in slots.values())
             return have, f"equip {short(data['Item'])}"
-        return None, kind  # quests, statistics: not decoded from the save
+        if kind.endswith("Statistic") or kind == "HuntingAnimalSpecies":
+            return self._statistic(kind, data)
+        if kind == "AstrologyMajorNodeUnlocked":
+            node = data.get("MajorNode")
+            have = any(node in c.get("major_nodes", []) for c in (self.state.get("astrology") or {}).values())
+            return have, f"Astrology node {short(node)}"
+        if kind == "MasteryGuildRank":
+            return self._mastery_rank(entity, data.get("Rank"))
+        if kind == "QuestComplete" and "quests" in self.state:
+            q = self.state["quests"].get(data["Quest"])
+            return q is not None and q["status"] == QUEST_DONE, f"finish quest {short(data['Quest'])}"
+        return None, kind  # statistics (and quests in an old player_state.json): not decoded from the save
+
+    STAT_KEYS = ("Item", "Course", "Event", "Enemy", "Species", "Animal", "Constellation")
+
+    def _statistic(self, kind, data):
+        """'have done X at least N times' requirements, read from the save's statistics."""
+        if "object_statistics" not in self.state:
+            return None, kind           # player_state.json from an older read_save.py
+        stat = data.get("Statistic")
+        key = next((data[k] for k in self.STAT_KEYS if data.get(k)), None)
+        need = data.get("Value", 1)
+        table = (self.state.get("item_statistics") or {}).get(stat)
+        if table is None:
+            table = (self.state.get("object_statistics") or {}).get(stat) or {}
+        have = table.get(key, 0) if key else sum(table.values())
+        label = f"{short(stat)}{' ' + short(key) if key else ''} {have:,.0f}/{need:,.0f}"
+        return have >= need, label
+
+    def _mastery_rank(self, skill, rank):
+        """Mastery Guild rank: True / False, or None when the save's points leave it uncertain."""
+        info = (self.state.get("mastery_ranks") or {}).get(skill)
+        if not info or not rank:
+            return None, f"{short(rank)} rank"
+        order = list(info.get("rank_pct") or {})
+        if rank not in order:
+            return None, f"{short(rank)} rank"
+        need = order.index(rank)
+        lo = order.index(info["rank_min"]) if info.get("rank_min") in order else -1
+        hi = order.index(info["rank_max"]) if info.get("rank_max") in order else -1
+        if lo >= need:
+            return True, f"{short(rank)} rank"
+        return (False if hi < need else None), f"{short(rank)} rank"
+
+    # quest-only actions ("Quests" category): offered only while a quest step is running
+    def quest_gate(self, a):
+        """The quest requirement that makes this quest action available now, or None."""
+        if self._quest_gates is None:
+            self._quest_gates = quest_gates()
+        for g in a.get("quest_gates") or self._quest_gates.get((a["type"], a["id"]), ()):
+            if self.quest_step_open(g):
+                return g
+        return None
+
+    def quest_step_open(self, g):
+        """g: QuestStepActive / QuestTaskGoalActive data {Quest, Step, Task}."""
+        q = (self.state.get("quests") or {}).get(g["Quest"])
+        if not q or q["status"] != QUEST_ACTIVE or not 0 <= g["Step"] < len(q["steps"]):
+            return False
+        step = q["steps"][g["Step"]]
+        if step["status"] != QUEST_ACTIVE:
+            return False
+        if g.get("Task") is None:
+            return True
+        return 0 <= g["Task"] < len(step["tasks"]) and step["tasks"][g["Task"]]["status"] == QUEST_ACTIVE
 
     def action(self, a):
         """(available, reasons-not-met, unverified)"""
@@ -185,14 +274,56 @@ def tree_hits(health, double, weak, instant):
     return e[health]
 
 
+@functools.lru_cache(maxsize=None)
+def thieving_damage(damage, avoid, max_hp, heal, failures=20000):
+    """Per failed pickpocket: food eaten and deaths, from a seeded run of `failures` failures.
+    Each hit deals 1..damage (unless avoided). Auto-eat: at or below 25% of max HP (and above 0) eat up to full,
+    max(1, floor((max - hp) / heal)) at once. A hit from above the threshold straight to 0 kills you; HP resets.
+    heal 0 = no food: also returns how many failures it takes to die from full HP."""
+    rng = random.Random(damage * 7919 + max_hp * 31 + heal)
+    threshold = round(0.25 * max_hp)
+    hp, food, deaths, first_death = max_hp, 0, 0, None
+    for i in range(failures):
+        if rng.random() < avoid:
+            continue
+        hp -= rng.randint(1, damage)
+        if hp <= 0:
+            deaths += 1
+            first_death = first_death or i + 1
+            hp = max_hp
+        elif hp <= threshold and heal > 0:
+            n = max(1, (max_hp - hp) // heal)
+            food += n
+            hp = min(max_hp, hp + n * heal)
+    if heal <= 0:
+        mean = (damage + 1) / 2 * (1 - avoid)
+        return {"food": 0.0, "deaths": deaths / failures, "fails_to_death": max_hp / mean if mean else float("inf")}
+    return {"food": food / failures, "deaths": deaths / failures, "fails_to_death": first_death or float("inf")}
+
+
+def drop_unsourced_supplies(rates, best):
+    """Supplies an action uses up (combat food, ammo, runes; Thieving food) that nothing can provide are
+    left out of its chain rather than dropping the action. Returns {action key: {item ids left out}}."""
+    left_out = defaultdict(set)
+    for key, r in rates.items():
+        optional = set(r["inputs"]) if r["skill"] == "Combat" else set(r.get("supplies") or ())
+        for inp in [i for i in r["inputs"] if i in optional and best[i][1] is None]:
+            del r["inputs"][inp]
+            left_out[key].add(inp)
+    return left_out
+
+
 class Rates:
     def __init__(self, state, bonuses, reqs):
         self.state, self.b, self.reqs = state, bonuses, reqs
+        self.extra_stealth = 0      # what-if: stealth from gear or ranks you don't have yet
         self.items = objects("Item")
         self.thieving = objects("ThievingRecipe")
         self.hunting = objects("HuntingAnimal")
         self.hunt_loc = objects("HuntingLocation")
         self.mining = objects("MiningRecipe")
+        ev = TABLES / "astrology_events.json"
+        self.astro_events = load(ev) if ev.exists() else {}
         cfg = load(TABLES / "entity_config.json")
         self.stone_items = [x["Id"] if isinstance(x, dict) else x for x in cfg[NS + "Mining"].get("StoneItems", [])]
         self.traps = defaultdict(list)
@@ -321,36 +452,226 @@ class Rates:
         return dict(ms=(lo + hi) / 2, xp=self.xp(a), inputs={}, outputs=outs, currency=cur,
                     detail=f"{lo}-{hi}ms, {fish:.0%} fish")
 
+    def item_bonuses(self, item_id, skill):
+        """Bonus rows an item gives to a skill (e.g. a food's +stealth while it is your Thieving food)."""
+        if not hasattr(self, "_item_rows"):
+            self._item_rows = defaultdict(list)
+            for b in load(TABLES / "bonus_sources.json"):
+                if b.get("source_type") == "Item" and b.get("entity") and b.get("component") in ("Action", "Experience"):
+                    self._item_rows[(b["source_id"], b["entity"])].append(b)
+        return self._item_rows.get((item_id, skill), [])
+
+    def thieving_food(self):
+        """The food Thieving eats: its own food slot, else your combat food. (item id, healing) or (None, 0)."""
+        for fid in (self.state.get("thieving_food"), (self.state.get("food") or {}).get("food")):
+            cap = ((self.items.get(fid) or {}).get("Capabilities") or {}).get(NS + "Food") if fid else None
+            if cap:
+                return fid, int(cap["BaseHealing"])
+        return None, 0
+
     def r_ThievingRecipe(self, a):
-        t = lambda s, i=None: self.b.total(a, s, i)
+        """Follows ThievingActionComponent: each attempt waits the interval and succeeds with
+        min(1, (100 + stealth) / (100 + perception)). A failure deals 1..Damage (unless avoided) and stuns
+        (unless avoided), and the stun waits its own interval before the next attempt. Your HP is shared with
+        combat; Thieving auto-eats its own food, and dying loses a toolbelt item and stops the action.
+        The food's own bonuses (e.g. Salmon Sushi +20 stealth) apply while it is your Thieving food."""
+        food_id, _ = self.thieving_food()
+        food_rows = self.item_bonuses(food_id, "Thieving") if food_id else []
+        t = lambda s, i=None: self.b.total(a, s, i, extra=food_rows)
         rec = self.thieving[a["id"]]
         iv = math.floor((rec["BaseInterval"] + t("FlatInterval")) * (1 + t("PercentInterval")))
         stun = math.floor((2000 + t("FlatStunInterval")) * (1 + t("PercentStunInterval")))
-        stealth = max(0, math.floor((self.reqs.level("Thieving") + t("FlatStealth")) * (1 + t("PercentStealth"))))
+        stealth = max(0, math.floor((self.reqs.level("Thieving") + t("FlatStealth") + self.extra_stealth)
+                                    * (1 + t("PercentStealth"))))
         perception = max(0, math.floor((rec["Perception"] + t("FlatPerception")) * (1 + t("PercentPerception"))))
         win = min(1.0, (100 + stealth) / (100 + perception))
         avoid = min(1, t("StunAvoidanceChance"))
         per_success = iv / win + (1 - win) / win * (1 - avoid) * stun
         stages = max(1, rec["Stages"] + int(t("FlatStages")))
         successes = expected_fires(stages, min(1, t("SkipStageChance")), guarded=False)
+        failures = (1 - win) / win * successes          # failed attempts per completion
+        fortune = t("FlatFortune") + (t("FlatFortuneUnderSuccess") if win < 1 else 0)
+        dbl = min(1, t("DoublingChance"))
         outs, cur = {}, {}
 
         def table(rows, chance, scale):
             tw = sum(r["Weight"] for r in rows) or 1
             for r in rows:
-                q = (r["MinQuantity"] + r["MaxQuantity"]) / 2
-                outs[r["Item"]] = outs.get(r["Item"], 0) + chance * r["Weight"] / tw * q * scale
+                lo, hi = int(r["MinQuantity"]), int(r["MaxQuantity"])
+                # quantity rolled uniformly, then floor(q x (1 + fortune / 100)), then maybe doubled
+                q = sum(math.floor(n * (1 + fortune / 100)) for n in range(lo, hi + 1)) / max(1, hi - lo + 1)
+                outs[r["Item"]] = outs.get(r["Item"], 0) + chance * r["Weight"] / tw * q * (1 + dbl) * scale
 
         c = rec.get("CurrencyReward")
         if c:
             ch = min(1, rec["BaseCurrencyLootChance"] * (1 + t("PercentCurrencyLootChance")))
-            cur[c["Currency"]] = ch * (c["MinQuantity"] + c["MaxQuantity"]) / 2 * (1 + t("PercentRewardCurrency")) * successes
+            pct, flat = t("PercentCurrencyReward"), t("FlatCurrencyReward")
+            lo = max(0, math.floor((c["MinQuantity"] + flat) * (1 + pct)))
+            hi = max(0, math.floor((c["MaxQuantity"] + flat) * (1 + pct)))
+            if hi > 0:
+                cur[c["Currency"]] = ch * (lo + hi) / 2 * successes
         table(rec["CommonDropTable"], min(1, rec["BaseCommonLootChance"] * (1 + t("PercentCommonLootChance"))), successes)
         table(rec["RareDropTable"], min(1, rec["BaseRareLootChance"] * (1 + t("PercentRareLootChance"))), successes)
         table(rec["CompletionDropTable"], 1.0, 1)
-        return dict(ms=per_success * successes, xp=self.xp(a), inputs={}, outputs=outs, currency=cur,
-                    detail=f"{iv}ms, {win:.0%} success, {stages} stage(s)",
-                    note="takes damage on failure; food not counted" if win < 1 else None)
+
+        # damage taken and the food it costs
+        inputs, notes, risk = {}, [], {}
+        if failures > 0 and rec["Damage"] > 0:
+            food, heal = self.thieving_food()
+            max_hp = max(10, 10 * self.reqs.level("Hitpoints"))
+            per_fail = thieving_damage(int(rec["Damage"]), round(min(1, t("DamageAvoidanceChance")), 4), max_hp, heal)
+            eaten = per_fail["food"] * failures
+            deaths = per_fail["deaths"] * failures
+            if food and eaten > 0:
+                inputs[food] = eaten
+            hrs = per_success * successes / 3_600_000
+            risk = {"food": food, "food_per_completion": eaten, "deaths_per_hr": deaths / hrs if hrs else 0.0,
+                    "damage": rec["Damage"], "max_hp": max_hp}
+            if not food:
+                notes.append(f"no Thieving food: you die after about {per_fail['fails_to_death']:.0f} failures")
+            elif deaths > 0:
+                notes.append(f"a {rec['Damage']}-damage hit can kill you from above the auto-eat point "
+                             f"(about every {1 / risk['deaths_per_hr']:.1f} h; you lose a toolbelt item)")
+        if t("SameAreaPickpocketChance") > 0:
+            notes.append("extra pickpockets of nearby NPCs not counted")
+        return dict(ms=per_success * successes, xp=self.xp(a), inputs=inputs, outputs=outs, currency=cur,
+                    detail=f"{iv}ms, {win:.0%} success, {stages} stage(s)", note="; ".join(notes) or None,
+                    supplies=set(inputs), thieving=dict(success=win, **risk))
+
+    def r_HerbloreRecipe(self, a):
+        """A brew prepares, heats and stirs once, then bottles 10 times. Each bottling uses one set of ingredients
+        (unless preserved), gives the XP and the potion (maybe doubled). Rates are per bottling."""
+        t = lambda s, i=None: self.b.total(a, s, i)
+        raw = a["raw_extra"]
+
+        def phase(name):
+            pct = t(f"Percent{name}Interval") + t("PercentInterval")
+            return math.floor(raw[f"Base{name}Interval"] * (1 + pct) + t(f"Flat{name}Interval") + t("FlatInterval"))
+
+        prep, heat, stir, bottle = (phase(n) for n in ("Preparing", "Heating", "Stirring", "Bottling"))
+        ms = (prep + heat + stir) / BOTTLES_PER_BREW + bottle
+        keep, dbl, cost = min(1, t("PreservationChance")), min(1, t("DoublingChance")), t("PercentIngredientCost")
+        ins = {i["item"]: max(1, int(i["qty"] * (1 + cost))) * (1 - keep) for i in a["inputs"]}
+        outs = {}
+        for o in a["outputs"]:
+            q = int(max(1, (o["qty"] + t("FlatProductQuantity", o["item"])) * (1 + t("PercentProductQuantity", o["item"]))))
+            outs[o["item"]] = outs.get(o["item"], 0) + q * o["chance"] * (1 + dbl)
+        return dict(ms=ms, xp=self.xp(a), inputs=ins, outputs=outs,
+                    detail=f"{prep + heat + stir}ms brewing per {BOTTLES_PER_BREW} bottles + {bottle}ms each")
+
+    def agility_food(self):
+        """The food Agility eats: its own food slot, else your combat food. (item id, healing) or (None, 0)."""
+        for fid in (self.state.get("agility_food"), (self.state.get("food") or {}).get("food")):
+            cap = ((self.items.get(fid) or {}).get("Capabilities") or {}).get(NS + "Food") if fid else None
+            if cap:
+                return fid, int(cap["BaseHealing"])
+        return None, 0
+
+    def r_AgilityCoursePath(self, a):
+        """One lap of a course path: each obstacle waits its interval, then succeeds with
+        0.95^((difficulty - technique level + 1) / 2) (1 once your technique level is above it; traps 80%, max 95%).
+        A failure deals 1..damage (unless avoided) and sends you back to the start (unless the repeat chance
+        lets you retry that obstacle); a restart pays the entry cost again. XP and rewards come per lap."""
+        t = lambda s, i=None: self.b.total(a, s, i)
+        raw = a["raw_extra"]
+        techs = self.state.get("agility_techniques") or {}
+        repeat, skip = min(1, t("RepeatFailedObstacleChance")), min(1, t("SkipObstacleChance"))
+        avoid, dbl = min(1, t("AvoidDamageChance")), min(1, t("DoublingChance"))
+        trap = max(0.0, min(0.95, 0.8 + t("FlatTrapSuccessChance")))
+        obs = []
+        for o in raw["obstacles"]:
+            iv = math.floor((o["interval"] + t("FlatInterval")) * (1 + t("PercentInterval")))
+            if o["trap"]:
+                p = trap
+            elif not o["technique"]:
+                p = 0.6
+            else:
+                level = (techs.get(o["technique"]) or {}).get("level", 1)
+                n = max(0.0, max(0.0, o["difficulty"] + t("FlatObstacleDifficulty")) - level + 1)
+                p = 0.95 ** (n / 2) if n > 0 else 1.0
+            dmg = max(1, math.floor(o["damage"] * (1 + t("PercentDamageTaken"))))
+            obs.append((iv, p, dmg))
+
+        def per_lap(cost):
+            """Expected total of a per-attempt cost over one lap, failures and restarts included."""
+            total = 0.0
+            for k, (iv, p, dmg) in enumerate(obs):
+                s_k = skip if k > 0 else 0.0
+                x = (1 - s_k) * (cost(iv, p, dmg) + (1 - p) * (1 - repeat) * total) / (1 - (1 - s_k) * (1 - p))
+                total += x
+            return total
+
+        ms = per_lap(lambda iv, p, d: iv)
+        fails = per_lap(lambda iv, p, d: 1 - p)
+        hits = per_lap(lambda iv, p, d: (1 - p) * d)
+        success = math.prod(p for _, p, _ in obs)
+        restarts = fails * (1 - repeat)
+        keep_entry = min(1, t("EntryCostPreservationChance"))
+        inputs = {i["item"]: i["qty"] * (1 + restarts) * (1 - keep_entry)
+                  for i in a["inputs"] if i.get("kind") != "currency"}
+        outs, cur = {}, {}
+        pct_reward = t("PercentRewardQuantity")
+        for o in a["outputs"]:
+            if o.get("kind") == "currency":
+                cur[o["item"]] = cur.get(o["item"], 0) + max(1, int(o["qty"] * (1 + pct_reward)))
+            elif o["chance"] >= 1:
+                outs[o["item"]] = outs.get(o["item"], 0) + max(1, int(o["qty"] * (1 + pct_reward)))
+            else:      # the random obstacle reward, collected when you pass that obstacle
+                ch = max(0.0, min(1.0, (o["chance"] + t("FlatObstacleRewardChance"))
+                                  * (1 + t("IncreasedObstacleRewardChance"))))
+                q = max(1, int((o["qty"] + t("FlatObstacleRewardQuantity")) * (1 + t("PercentObstacleRewardQuantity"))))
+                outs[o["item"]] = outs.get(o["item"], 0) + ch * q * (1 + dbl)
+        notes, risk = [], {}
+        if fails > 1e-9:
+            food, heal = self.agility_food()
+            max_hp = max(10, 10 * self.reqs.level("Hitpoints"))
+            mean_dmg = max(1, round(hits / fails))
+            per_fail = thieving_damage(int(mean_dmg), round(avoid, 4), max_hp, heal)
+            eaten, deaths = per_fail["food"] * fails, per_fail["deaths"] * fails
+            if food and eaten > 0:
+                inputs[food] = inputs.get(food, 0) + eaten
+            hrs = ms / 3_600_000
+            risk = {"food": food, "food_per_completion": eaten, "deaths_per_hr": deaths / hrs if hrs else 0.0,
+                    "damage": max(d for _, _, d in obs), "max_hp": max_hp}
+            if not food:
+                notes.append(f"no food: you die after about {per_fail['fails_to_death']:.0f} failed obstacles")
+            elif deaths > 0:
+                notes.append(f"failures can kill you (about every {1 / risk['deaths_per_hr']:.1f} h; "
+                             f"you lose a toolbelt item)")
+        if raw.get("timed_rewards"):
+            notes.append("rewards for fast laps not counted")
+        return dict(ms=ms, xp=self.xp(a), inputs=inputs, outputs=outs, currency=cur,
+                    detail=f"{len(obs)} obstacles, {success:.0%} chance of a clean lap, {fails:.2f} fails per lap",
+                    note="; ".join(notes) or None, supplies={i for i in inputs if i == risk.get("food")},
+                    agility=dict(success=success, fails=fails, **risk))
+
+    def r_AstrologyConstellation(self, a):
+        """Each study waits the interval, gives XP and knowledge, and rolls every event: global ones and the
+        constellation's own. Item events give base + 0..(Astrology level x scaling) items, maybe doubled."""
+        t = lambda s, i=None: self.b.total(a, s, i)
+        iv = math.floor((a["interval_ms"] + t("FlatInterval")) * (1 + t("PercentInterval")))
+        level = self.reqs.level("Astrology")
+        outs = {}
+
+        def visit(eid, chance, depth):
+            e = self.astro_events.get(eid)
+            if not e or depth > 4 or chance <= 0:
+                return
+            if e["kind"] == "AstrologyItemEvent":
+                q = e["BaseQuantity"] + level * e["LevelScalingQuantity"] / 2
+                outs[e["Item"]] = outs.get(e["Item"], 0) + chance * q * (1 + min(1, t("ItemDoublingChance")))
+            elif e["kind"] == "AstrologyTableEvent":
+                tw = sum(x["Weight"] for x in e.get("Events") or []) or 1
+                for x in e.get("Events") or []:
+                    visit(x["Event"], chance * x["Weight"] / tw, depth + 1)
+
+        for eid in a["raw_extra"]["events"]:
+            e = self.astro_events.get(eid)
+            if e:
+                visit(eid, min(1.0, max(0.0, e["Chance"] * (1 + t("PercentEventChance")) + t("FlatEventChance"))), 0)
+        knowledge = max(0.0, (a["raw_extra"]["knowledge"] + t("FlatKnowledge")) * (1 + t("PercentKnowledge")))
+        return dict(ms=iv, xp=self.xp(a), inputs={}, outputs=outs,
+                    detail=f"{iv}ms, {knowledge:g} knowledge per study")
 
     def r_HuntingAnimal(self, a):
         rec = self.hunting[a["id"]]
@@ -419,23 +740,40 @@ def solve_chains(rates, sources, max_iter=60):
         for item, q in r["outputs"].items():
             if q > 1e-12:
                 producers[item].append((key, q))
-    for _ in range(max_iter):
-        changed = False
-        for item, plist in producers.items():
-            for key, q in plist:
-                r = rates[key]
-                cost = r["ms"]
-                for inp, n in r["inputs"].items():
-                    cost += n * best[inp][0]
-                    if cost == INF:
-                        break
-                unit = cost / q
-                if unit < best[item][0] - 1e-9:
-                    best[item] = (unit, key)
-                    changed = True
-        if not changed:
-            break
+    supplies = {key: _supplies(r) for key, r in rates.items()}
+
+    def cost_of(key, skip_supplies):
+        r = rates[key]
+        cost = r["ms"]
+        for inp, n in r["inputs"].items():
+            c = best[inp][0]
+            if c == INF and skip_supplies and inp in supplies[key]:
+                continue            # a supply that can't be priced yet: leave it out for now
+            cost += n * c
+            if cost == INF:
+                break
+        return cost
+
+    # Pass 1 prices supplies only when they already have a price, which breaks loops such as
+    # "Thieving needs food -> the food needs an ingredient from Thieving". Pass 2 then prices
+    # everything, so the loop's cost is included once each part has a finite price.
+    for skip in (True, False):
+        for _ in range(max_iter):
+            changed = False
+            for item, plist in producers.items():
+                for key, q in plist:
+                    unit = cost_of(key, skip) / q
+                    if unit < best[item][0] - 1e-9 or (not skip and best[item][1] == key and abs(unit - best[item][0]) > 1e-6):
+                        best[item] = (unit, key)
+                        changed = True
+            if not changed:
+                break
     return best
+
+
+def _supplies(r):
+    """Inputs an action uses up without them being an ingredient: combat supplies, Thieving food."""
+    return set(r["inputs"]) if r.get("skill") == "Combat" else set(r.get("supplies") or ())
 
 
 def expand(key, rates, best):
@@ -453,8 +791,12 @@ def expand(key, rates, best):
                 shop[inp] += n * mult
             elif src == "passive":
                 passive[inp] += n * mult
-            elif src is None or src in stack or len(stack) > 12:
+            elif src is None:
                 return inp
+            elif (src in stack or len(stack) > 12) and n * mult < 1e-4:
+                continue        # a loop (e.g. Thieving food made from Thieving loot) whose remainder is negligible
+            elif len(stack) > 40:
+                return inp      # a loop that does not shrink: it can't be costed
             else:
                 missing = visit(src, n * mult / rates[src]["outputs"][inp], stack + (k,))
                 if missing:
@@ -464,6 +806,158 @@ def expand(key, rates, best):
 
     missing = visit(key, 1.0, ())
     return (None, None, None, missing) if missing else (steps, shop, passive, None)
+
+
+# ---------------------------------------------------------------- shared pipeline
+
+BOTTLES_PER_BREW = 10   # Herblore: bottles per brew (fixed in the game)
+CONVERTER_MS = 1        # instant steps (opening an item, the Grain Mill) still need a non-zero time
+
+
+def converters(calc, reqs, actions):
+    """Steps that take no active time but turn one item into another, so chains can use them:
+    opening an item (one roll of its drop table plus its fixed drops; e.g. Seaweed Clump -> 100 Seaweed), and
+    the Grain Mill once bought (e.g. 10 Wheat -> 20 Grain; it runs on its own while you do other things).
+    They are marked converter=True and never ranked themselves."""
+    out = {}
+    for iid, it in calc.items.items():
+        cap = (it.get("Capabilities") or {}).get(NS + "Openable")
+        if not cap or not all(reqs.check_raw(r)[0] for r in (cap.get("Requirements") or [])):
+            continue
+        outs = {}
+        for d in cap.get("AlwaysDrops") or []:
+            outs[d["Item"]] = outs.get(d["Item"], 0) + d["Quantity"]
+        table = cap.get("DropTable") or []
+        tw = sum(d["Weight"] for d in table) or 1
+        for d in table:
+            outs[d["Item"]] = outs.get(d["Item"], 0) + d["Weight"] / tw * (d["MinQuantity"] + d["MaxQuantity"]) / 2
+        name = (it.get("DisplayName") or {}).get("Singular") if isinstance(it.get("DisplayName"), dict) else it.get("DisplayName")
+        out[f"Open/{short(iid)}"] = dict(key=f"Open/{short(iid)}", skill="Bank", name=f"Open {name or short(iid)}",
+                                         level_req=1, ms=CONVERTER_MS, xp=0.0, xp_split={}, inputs={iid: 1.0},
+                                         outputs=outs, detail="opening takes no time", converter=True)
+    for a in actions:
+        if a["type"] == "GrainMillRecipe" and not a["demo_locked"] and reqs.action(a)[0]:
+            out[a["key"]] = dict(key=a["key"], skill=a["skill"], name=f"Grain Mill: {a['name']}", level_req=a["level_req"] or 1,
+                                 ms=CONVERTER_MS, xp=0.0, xp_split={},
+                                 inputs={i["item"]: i["qty"] for i in a["inputs"]},
+                                 outputs={o["item"]: o["qty"] * o["chance"] for o in a["outputs"]},
+                                 detail="the Grain Mill runs on its own", converter=True)
+    return out
+
+
+def action_rates(actions, state, bonuses, reqs, calc=None, quests=False):
+    """Rates for every non-passive action this state has unlocked, plus instant converters (see converters()).
+    quests=True also includes quest actions whose quest step is running now (marked with "quest").
+    Returns (rates, passive_rows, blocked: skill -> [(action, missing, unknown)])."""
+    calc = calc or Rates(state, bonuses, reqs)
+    rates, passive_rows, blocked = {}, [], defaultdict(list)
+    rates.update(converters(calc, reqs, actions))
+    for a in actions:
+        gate = None
+        if (a["category"] and "Quest" in a["category"]) or a.get("quest_gates"):
+            # temporary: only while its quest step runs, so it is left out of levelling plans
+            gate = reqs.quest_gate(a) if quests and not a["demo_locked"] else None
+            if gate is None:
+                continue
+        ok, missing, unknown = reqs.action(a)
+        if not ok:
+            if not a["demo_locked"]:
+                blocked[a["skill"]].append((a, missing, unknown))
+            continue
+        if a["type"] in PASSIVE_TYPES:
+            if a["type"] != "GrainMillRecipe":
+                passive_rows.append(a)
+            continue
+        r = calc.compute(a)
+        if r is None or not r["ms"]:
+            continue
+        r.update(key=a["key"], skill=a["skill"], name=a["name"], level_req=a["level_req"] or 1,
+                 xp_split={a["skill"]: r["xp"]})
+        if gate:
+            r["quest"] = gate
+        rates[a["key"]] = r
+    return rates, passive_rows, blocked
+
+
+def zero_time_sources(reqs, gold, no_shop=False, passive_rows=(), passive_free=False, rates=None):
+    """Items obtainable with no active time: shop purchases for gold, and passive produce (Farming, Ranching).
+    Passive produce counts for every item with passive_free; otherwise (given `rates`) only for items no active
+    action makes, such as herbs, so chains that need them can still be costed."""
+    sources = {}
+    made = {i for r in (rates or {}).values() for i, q in r["outputs"].items() if q > 1e-12}
+    for a in passive_rows:
+        for o in a["outputs"]:
+            if passive_free or (rates is not None and o["item"] not in made):
+                sources[o["item"]] = ("passive", 0.0)
+    if not no_shop:
+        for s in load(TABLES / "shop_purchases.json"):
+            gp = [c for c in s["costs"]["Currencies"] if c["Currency"] == gold]
+            if s["buy_limit"] != 0 or s["costs"]["Items"] or len(gp) != len(s["costs"]["Currencies"]) or not gp:
+                continue
+            if not all(reqs.check_raw(r)[0] for r in s["requirements"]):
+                continue
+            for p in s["provides_items"]:
+                unit = gp[0]["Quantity"] / p["Quantity"]
+                if p["Item"] not in sources or sources[p["Item"]][1] > unit:
+                    sources[p["Item"]] = ("shop", unit)
+    return sources
+
+
+def chain_row(key, rates, best, sources, item_name, price, gold, state=None, uncosted=()):
+    """One action costed from a standing start, per hour. Returns (row, None) or (None, missing item)."""
+    r = rates[key]
+    steps, shop, passive, missing = expand(key, rates, best)
+    if missing:
+        return None, missing
+    total_ms = sum(c * rates[k]["ms"] for k, c in steps.items())
+    f = HOUR / total_ms
+    xp_by_skill, net, coins, other_cur = defaultdict(float), defaultdict(float), 0.0, defaultdict(float)
+    step_rows = []
+    for k, c in steps.items():
+        sr = rates[k]
+        for sk, v in sr["xp_split"].items():
+            xp_by_skill[sk] += v * c * f
+        for it, q in sr["outputs"].items():
+            net[it] += q * c
+        for it, n in sr["inputs"].items():
+            net[it] -= n * c
+        for cur, q in (sr.get("currency") or {}).items():
+            if cur == gold:
+                coins += q * c
+            else:
+                other_cur[short(cur)] += q * c * f
+        makes = sorted(((q * c * f, item_name(it)) for it, q in sr["outputs"].items() if q * c * f >= 0.05),
+                       reverse=True)
+        step_rows.append(dict(
+            name=sr["name"], skill=sr["skill"], final=k == key, per_hr=c * f,
+            share=c * sr["ms"] / total_ms, secs_each=sr["ms"] / 1000,
+            xp_hr={sk: v * c * f for sk, v in sr["xp_split"].items()},
+            uses=[(n * c * f, item_name(it)) for it, n in sr["inputs"].items() if n > 0],
+            makes=makes[:4], detail=sr["detail"], note=sr.get("note")))
+    shop_rows, shop_cost = [], 0.0
+    for it, n in shop.items():
+        net[it] += n
+        shop_cost += n * sources[it][1]
+        shop_rows.append(dict(item=item_name(it), per_hr=n * f, gp_hr=n * sources[it][1] * f))
+    for it, n in passive.items():
+        net[it] += n
+    sold = sorted(((q * price(it) * f, q * f, item_name(it)) for it, q in net.items()
+                   if q > 1e-9 and price(it) > 0), reverse=True)
+    sell_value = sum(v for v, _, _ in sold)
+    own_xp = (sum(r["xp_split"].values()) * steps[key] * f if r["skill"] == "Combat"
+              else xp_by_skill.get(r["skill"], 0.0))
+    return dict(
+        skill=r["skill"], name=r["name"], key=key, level_req=r["level_req"],
+        xp_hr=own_xp, xp_total_hr=sum(xp_by_skill.values()), xp_by_skill=dict(xp_by_skill),
+        gp_hr=sell_value + coins * f - shop_cost * f, sell_hr=sell_value, coins_hr=coins * f,
+        shop_hr=shop_cost * f, other_currencies=dict(other_cur),
+        sold=[dict(gp_hr=v, per_hr=q, item=n) for v, q, n in sold],
+        steps=step_rows, shop=shop_rows,
+        passive=[dict(item=item_name(it), per_hr=n * f) for it, n in passive.items()],
+        final_share=steps[key] * r["ms"] / total_ms, per_hr=steps[key] * f,
+        seconds_each=r["ms"] / 1000, detail=r["detail"], note=r.get("note"), combat=r.get("combat"),
+        loadout=r.get("loadout"), recorded=recorded(state, r) if state else None,
+        uncosted=sorted(uncosted)), None
 
 
 # ---------------------------------------------------------------- combat history
@@ -597,24 +1091,7 @@ def main():
         sell = items.get(i, {}).get("SellsFor") or {}
         return sell.get("Quantity", 0) if sell.get("Currency") == gold else 0
 
-    rates, passive_rows, blocked = {}, [], defaultdict(list)
-    for a in actions:
-        if a["category"] and "Quest" in a["category"]:
-            continue  # one-off quest objectives
-        ok, missing, unknown = reqs.action(a)
-        if not ok:
-            if not a["demo_locked"]:
-                blocked[a["skill"]].append((a, missing, unknown))
-            continue
-        if a["type"] in PASSIVE_TYPES:
-            passive_rows.append(a)
-            continue
-        r = calc.compute(a)
-        if r is None or not r["ms"]:
-            continue
-        r.update(key=a["key"], skill=a["skill"], name=a["name"], level_req=a["level_req"] or 1,
-                 xp_split={a["skill"]: r["xp"]})
-        rates[a["key"]] = r
+    rates, passive_rows, blocked = action_rates(actions, state, bonuses, reqs, calc)
 
     # every equipment loadout: the one worn now plus the saved sets
     gear_sets, no_weapon, engines = [], [], {}
@@ -646,86 +1123,22 @@ def main():
         return
 
     # zero-active-time sources: shop purchases and (optionally) passive produce
-    sources = {}
-    for a in passive_rows if args.passive_free else []:
-        for o in a["outputs"]:
-            sources[o["item"]] = ("passive", 0.0)
-    if not args.no_shop:
-        for s in load(TABLES / "shop_purchases.json"):
-            gp = [c for c in s["costs"]["Currencies"] if c["Currency"] == gold]
-            if s["buy_limit"] != 0 or s["costs"]["Items"] or len(gp) != len(s["costs"]["Currencies"]) or not gp:
-                continue
-            if not all(reqs.check_raw(r)[0] for r in s["requirements"]):
-                continue
-            for p in s["provides_items"]:
-                unit = gp[0]["Quantity"] / p["Quantity"]
-                if p["Item"] not in sources or sources[p["Item"]][1] > unit:
-                    sources[p["Item"]] = ("shop", unit)
+    sources = zero_time_sources(reqs, gold, args.no_shop, passive_rows, args.passive_free, rates)
 
     best = solve_chains(rates, sources)
-    # a combat input nothing can supply (e.g. food you cannot cook) is dropped from the chain, not the fight
-    uncosted = defaultdict(set)
-    for key, r in rates.items():
-        if r["skill"] == "Combat":
-            for inp in [i for i in r["inputs"] if best[i][1] is None]:
-                del r["inputs"][inp]
-                uncosted[key].add(item_name(inp))
+    # a supply nothing can provide (e.g. food you cannot cook) is dropped from the chain, not the action
+    uncosted = {k: {item_name(i) for i in v} for k, v in drop_unsourced_supplies(rates, best).items()}
     if uncosted:
         best = solve_chains(rates, sources)
     rows, no_source = [], defaultdict(list)
     for key, r in rates.items():
-        steps, shop, passive, missing = expand(key, rates, best)
+        if r.get("converter"):
+            continue        # instant steps are part of chains, not things to do on their own
+        row, missing = chain_row(key, rates, best, sources, item_name, price, gold, state, uncosted.get(key, ()))
         if missing:
             no_source[r["skill"]].append((r["name"], item_name(missing)))
             continue
-        total_ms = sum(c * rates[k]["ms"] for k, c in steps.items())
-        f = HOUR / total_ms
-        xp_by_skill, net, coins, other_cur = defaultdict(float), defaultdict(float), 0.0, defaultdict(float)
-        step_rows = []
-        for k, c in steps.items():
-            sr = rates[k]
-            for sk, v in sr["xp_split"].items():
-                xp_by_skill[sk] += v * c * f
-            for it, q in sr["outputs"].items():
-                net[it] += q * c
-            for it, n in sr["inputs"].items():
-                net[it] -= n * c
-            for cur, q in (sr.get("currency") or {}).items():
-                if cur == gold:
-                    coins += q * c
-                else:
-                    other_cur[short(cur)] += q * c * f
-            makes = sorted(((q * c * f, item_name(it)) for it, q in sr["outputs"].items() if q * c * f >= 0.05),
-                           reverse=True)
-            step_rows.append(dict(
-                name=sr["name"], skill=sr["skill"], final=k == key, per_hr=c * f,
-                share=c * sr["ms"] / total_ms, secs_each=sr["ms"] / 1000,
-                xp_hr={sk: v * c * f for sk, v in sr["xp_split"].items()},
-                uses=[(n * c * f, item_name(it)) for it, n in sr["inputs"].items() if n > 0],
-                makes=makes[:4], detail=sr["detail"], note=sr.get("note")))
-        shop_rows, shop_cost = [], 0.0
-        for it, n in shop.items():
-            net[it] += n
-            shop_cost += n * sources[it][1]
-            shop_rows.append(dict(item=item_name(it), per_hr=n * f, gp_hr=n * sources[it][1] * f))
-        for it, n in passive.items():
-            net[it] += n
-        sold = sorted(((q * price(it) * f, q * f, item_name(it)) for it, q in net.items()
-                       if q > 1e-9 and price(it) > 0), reverse=True)
-        sell_value = sum(v for v, _, _ in sold)
-        own_xp = (sum(r["xp_split"].values()) * steps[key] * f if r["skill"] == "Combat"
-                  else xp_by_skill.get(r["skill"], 0.0))
-        rows.append(dict(
-            skill=r["skill"], name=r["name"], key=key, level_req=r["level_req"],
-            xp_hr=own_xp, xp_total_hr=sum(xp_by_skill.values()), xp_by_skill=dict(xp_by_skill),
-            gp_hr=sell_value + coins * f - shop_cost * f, sell_hr=sell_value, coins_hr=coins * f,
-            shop_hr=shop_cost * f, other_currencies=dict(other_cur),
-            sold=[dict(gp_hr=v, per_hr=q, item=n) for v, q, n in sold],
-            steps=step_rows, shop=shop_rows,
-            passive=[dict(item=item_name(it), per_hr=n * f) for it, n in passive.items()],
-            final_share=steps[key] * r["ms"] / total_ms, per_hr=steps[key] * f,
-            seconds_each=r["ms"] / 1000, detail=r["detail"], note=r.get("note"), combat=r.get("combat"),
-            loadout=r.get("loadout"), recorded=recorded(state, r), uncosted=sorted(uncosted.get(key, ()))))
+        rows.append(row)
 
     OUT.mkdir(parents=True, exist_ok=True)
     with open(OUT / "rates.csv", "w", newline="", encoding="utf-8-sig") as fh:

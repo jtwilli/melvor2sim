@@ -1,6 +1,6 @@
 """Normalize the extracted Melvor Idle 2 game data into calculator input tables.
 
-Reads data/raw/Data/Packages/MelvorDemo.json (run unpack_melvor.py first) and
+Reads data/raw/Data/Packages/MelvorBase.json (run unpack_melvor.py first) and
 writes data/tables/. Base values only: nothing here applies player bonuses.
 
     python -I build_tables.py
@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-SRC = ROOT / "data" / "raw" / "Data" / "Packages" / "MelvorDemo.json"
+SRC = ROOT / "data" / "raw" / "Data" / "Packages" / "MelvorBase.json"
 OUT = ROOT / "data" / "tables"
 NS = "MelvorBase:"
 
@@ -225,6 +225,76 @@ def base_completion_ms(a):
     return None
 
 
+def _base_action(skill, otype, rid, name, category, order, rec, base_xp):
+    level, locked, other = requirements(rec, skill)
+    return {"key": f"{skill}/{rid}", "skill": skill, "id": NS + rid, "type": otype, "name": name,
+            "category": category, "subcategory": None, "order": order, "level_req": level,
+            "demo_locked": locked, "other_requirements": other, "base_xp": base_xp,
+            "interval_ms": None, "interval_min_ms": None, "interval_max_ms": None, "steps": None,
+            "inputs": [], "outputs": [], "raw_extra": {}}
+
+
+def build_agility(objects, config):
+    """One action per course path: a lap runs every obstacle in order (see docs/FORMULAS.md)."""
+    cfg = config.get(NS + "Agility") or {}
+    courses = {NS + r["Id"]: r for r in objects.get("AgilityCourse", [])}
+    paths = {NS + r["Id"]: r for r in objects.get("AgilityCoursePath", [])}
+    obstacles = {NS + r["Id"]: r for r in objects.get("AgilityObstacle", [])}
+    locations = {NS + r["Id"]: r for r in objects.get("AgilityLocation", [])}
+    quest_types = ("QuestStepActive", "QuestTaskGoalActive")
+    out = []
+    for order, ref in enumerate(sorted(cfg.get("Courses", []), key=lambda x: x["Priority"])):
+        c = courses.get(ref["Id"])
+        if not c:
+            continue
+        for pid in c["Paths"]:
+            pth = paths.get(pid)
+            if not pth:
+                continue
+            obs = [obstacles[o] for o in pth["Obstacles"] if o in obstacles]
+            name = name_of(c["DisplayName"]) + (f": {name_of(pth['DisplayName'])}" if len(c["Paths"]) > 1 else "")
+            a = _base_action("Agility", "AgilityCoursePath", pth["Id"], name, c["Location"], order, c, pth["BaseExperience"])
+            shown = (c.get("DisplayRequirements") or []) + ((locations.get(c["Location"]) or {}).get("DisplayRequirements") or [])
+            a["quest_gates"] = [d["Data"] for d in shown if short(d["Type"]) in quest_types]
+            a["inputs"] = ingredients(c, "EntryCost")
+            rew = c.get("CompletionRewards") or {}
+            a["outputs"] = [io(i["Item"], i["Quantity"], per="lap") for i in rew.get("Items") or []]
+            a["outputs"] += [io(x["Currency"], x["Quantity"], per="lap", kind="currency") for x in rew.get("Currencies") or []]
+            a["outputs"] += products(pth.get("RandomObstacleProducts"), "lap")
+            a["interval_ms"] = sum(o["BaseInterval"] for o in obs)
+            a["raw_extra"] = {
+                "course": NS + c["Id"], "location": c["Location"], "gives_technique_xp": bool(c.get("GivesTechniqueXP")),
+                "technique_xp": pth.get("BaseTechniqueExperience") or 0, "timed_rewards": bool(c.get("TimedCompletionRewards")),
+                "obstacles": [{"id": NS + o["Id"], "interval": o["BaseInterval"], "technique": o.get("Technique"),
+                               "difficulty": o["Difficulty"], "damage": o["Damage"], "trap": bool(o.get("IsTrap"))}
+                              for o in obs]}
+            out.append(a)
+    return out
+
+
+def build_astrology(objects, config):
+    """One action per constellation: each study gives XP, knowledge and rolls every event."""
+    cfg = config.get(NS + "Astrology") or {}
+    cons = {NS + r["Id"]: r for r in objects.get("AstrologyConstellation", [])}
+    events = {}
+    for t in ("AstrologyItemEvent", "AstrologyTableEvent", "AstrologyObservationEvent", "AstrologyBonusesEvent"):
+        for r in objects.get(t, []):
+            events[NS + r["Id"]] = dict(r, kind=t)
+    glob = [e["Id"] for e in cfg.get("GlobalEvents", [])]
+    out = []
+    for order, ref in enumerate(sorted(cfg.get("Constellations", []), key=lambda x: x["Priority"])):
+        c = cons.get(ref["Id"])
+        if not c:
+            continue
+        a = _base_action("Astrology", "AstrologyConstellation", c["Id"], name_of(c["DisplayName"]), c.get("Category"),
+                         order, c, c["BaseExperience"])
+        a["interval_ms"] = c["BaseInterval"]
+        a["raw_extra"] = {"knowledge": c["BaseKnowledge"], "events": glob + list(c.get("Events") or []),
+                          "secondary_requirements": c.get("SecondaryRequirements")}
+        out.append(a)
+    return out, events
+
+
 def build_actions(objects, config):
     actions, problems = [], []
     by_type = {t: {NS + r["Id"]: r for r in objects[t]} for t in NORMALIZERS}
@@ -356,6 +426,14 @@ def main():
     write_json(OUT / "entity_config.json", config)
 
     actions, problems = build_actions(objects, config)
+    actions += build_agility(objects, config)
+    astro, astro_events = build_astrology(objects, config)
+    actions += astro
+    for a in actions:
+        if a["type"] in ("AgilityCoursePath", "AstrologyConstellation"):
+            a["base_completion_ms"] = a["interval_ms"]
+            a["base_xp_per_hour"] = round(a["base_xp"] * 3_600_000 / a["interval_ms"], 2) if a["interval_ms"] else None
+    write_json(OUT / "astrology_events.json", astro_events)
     write_json(OUT / "actions.json", actions)
     write_csv(OUT / "actions.csv",
               ["key", "skill", "id", "name", "type", "category", "subcategory", "level_req", "demo_locked",

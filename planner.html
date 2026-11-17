@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Levelling Planner</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--ink:#1c1b19;--muted:#6b6862;--line:#e3e0d8;--accent:#2f6f4f;--accent-bg:#e7f1ea;
+--gold:#8a6410;--gold-bg:#f6edd6;--warn:#8a3b1c;--warn-bg:#f8e7df;--amber:#7a5a00;--amber-bg:#fbf1d0;--chip:#efede7;--field:#fff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--card:#1f1f1c;--ink:#ecebe6;--muted:#a09d95;--line:#33322e;
+--accent:#7fc7a0;--accent-bg:#1e3329;--gold:#e0b858;--gold-bg:#3a3018;--warn:#f0a585;--warn-bg:#40251a;--amber:#e9c46a;--amber-bg:#3a3214;--chip:#2a2a26;--field:#262622}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1280px;margin:0 auto;padding:0 16px 60px}
+header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding:22px 0 10px}
+h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 8px}
+h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 6px;font-weight:600}
+.muted{color:var(--muted)}.small{font-size:12.5px}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:6px 12px}
+button:hover{background:var(--chip)}button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+button:disabled{opacity:.6;cursor:wait}
+.navlink{font-size:13px;font-weight:600;color:var(--accent);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+.navlink:hover{background:var(--chip)}
+.grid{display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.field{display:flex;flex-direction:column;gap:4px;margin-bottom:12px}
+.field>label{font-size:12.5px;color:var(--muted);font-weight:600}
+select,input{font:inherit;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:7px;padding:6px 8px;width:100%;min-width:0}
+input[type=checkbox]{width:auto}
+.quick{display:flex;gap:6px;flex-wrap:wrap}
+.quick button{padding:3px 10px;font-size:12.5px;border-radius:999px}
+.note{font-size:12px;color:var(--muted)}
+.warnline{font-size:12px;color:var(--warn)}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:10px 0}
+@media (max-width:600px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{background:var(--chip);border-radius:10px;padding:10px 12px}
+.kpi .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:12px;color:var(--muted)}
+.banner{border-radius:10px;padding:9px 12px;margin:8px 0;font-size:13px}
+.banner.bad{background:var(--warn-bg);color:var(--warn)}.banner.warn{background:var(--amber-bg);color:var(--amber)}
+.tag{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.tag.bad{background:var(--warn-bg);color:var(--warn)}.tag.warn{background:var(--amber-bg);color:var(--amber)}.tag.ok{background:var(--accent-bg);color:var(--accent)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.status{font-size:12.5px;color:var(--muted);min-height:18px;margin-top:8px}
+.step{border:1px solid var(--line);border-radius:10px;margin:10px 0;overflow:hidden}
+.step.off{border-style:dashed}
+.stephead{display:grid;grid-template-columns:92px minmax(0,1fr) repeat(3,minmax(70px,auto));gap:12px;align-items:center;padding:10px 12px;background:var(--chip)}
+@media (max-width:640px){.stephead{grid-template-columns:76px minmax(0,1fr) auto}.stephead .hide-sm{display:none}}
+.lvl{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.lvl small{display:block;font-weight:400;color:var(--muted);font-size:11.5px}
+.stat{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat small{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.stepbody{padding:8px 12px 10px}
+table{border-collapse:collapse;width:100%}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:5px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.final td{font-weight:600}
+.scroll{overflow-x:auto}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:0 24px}@media (max-width:700px){.two{grid-template-columns:1fr}}
+.empty{padding:28px 6px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Levelling planner</h1>
+    <span class="muted" id="who"></span>
+    <span style="flex:1"></span>
+    <a class="navlink" href="/">← Combat simulator</a>
+    <button id="reload" title="Re-read your save file">Reload save</button>
+  </header>
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Goal</h2>
+        <div class="field"><label for="skill">Skill</label><select id="skill"></select></div>
+        <div class="field">
+          <label for="target">Target level</label>
+          <input id="target" type="number" step="1">
+          <div class="quick" id="quick"></div>
+        </div>
+        <div id="focusBox">
+          <h3>Focus (optional)</h3>
+          <div class="field"><label for="cat">Make</label><select id="cat"></select></div>
+          <div class="field"><label for="use">Used for</label><select id="use"></select></div>
+          <div class="note" id="focusNote"></div>
+          <label class="small muted" style="display:block;margin-top:10px" title="Take ingredients from your bank before gathering or buying more"><input type="checkbox" id="useBank"> Use items in my bank</label>
+          <label class="small muted" style="display:block;margin-top:6px"><input type="checkbox" id="noShop"> Never buy ingredients from the shop</label>
+        </div>
+        <div id="combatBox" hidden>
+          <h3>Combat setup</h3>
+          <div class="field"><label for="loadout">Loadout</label><select id="loadout"></select></div>
+          <div class="note" id="loadoutNote"></div>
+          <div class="note" style="margin-top:6px">For other gear, food or prayers, set them up in the <a href="/">combat simulator</a> and save them to a loadout in game.</div>
+        </div>
+        <div style="margin-top:14px"><button class="primary" id="go" style="width:100%">Plan route</button></div>
+        <div class="status" id="status"></div>
+      </div>
+      <div class="card small muted">
+        At every level the planner picks the fastest action, counting the time to gather and craft its ingredients from nothing.
+        XP that other skills earn along the way raises their levels too, so later steps can use what they unlock.
+        A focus limits the <b>final</b> action; ingredients still come from wherever is fastest.
+      </div>
+    </div>
+    <div id="out"></div>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const n = v => v == null || isNaN(v) ? "-" : Math.abs(v) >= 100 ? Math.round(v).toLocaleString() : Math.abs(v) >= 10 ? v.toFixed(0) : v.toFixed(1);
+const cnt = v => v == null ? "-" : v >= 10 ? Math.round(v).toLocaleString() : v >= 1 ? v.toFixed(1) : v.toFixed(2);
+const fmtH = h => h == null ? "-" : h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : h < 48 ? `${h.toFixed(1)} h` : `${(h / 24).toFixed(1)} days`;
+const store = {get(k){try{return localStorage.getItem(k)}catch(e){return null}}, set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+let INIT = null, PLAN = null, seq = 0;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const cur = () => INIT.skills.find(s => s.skill === $("skill").value);
+
+// ------------------------------------------------------------------ controls
+function renderSkills(keep) {
+  const prev = keep ? $("skill").value : store.get("skill");
+  const opt = s => `<option value="${esc(s.skill)}">${esc(s.skill)} — level ${s.level}</option>`;
+  $("skill").innerHTML =
+    `<optgroup label="Skilling">${INIT.skills.filter(s => !s.combat).map(opt).join("")}</optgroup>` +
+    `<optgroup label="Combat">${INIT.skills.filter(s => s.combat).map(opt).join("")}</optgroup>`;
+  if (prev && INIT.skills.some(s => s.skill === prev)) $("skill").value = prev;
+  $("loadout").innerHTML = INIT.loadouts.map((l, i) =>
+    `<option value="${i}">${esc(l.name)}${l.worn ? " (worn now)" : ""}${l.weapon ? " — " + esc(l.weapon) : ""}</option>`).join("");
+  const worn = INIT.loadouts.findIndex(l => l.worn);
+  if (worn >= 0) $("loadout").value = worn;
+  skillChanged(keep);
+}
+
+function skillChanged(keepTarget) {
+  const s = cur();
+  if (!s) return;
+  store.set("skill", s.skill);
+  const t = parseInt($("target").value, 10);
+  $("target").min = s.level + 1;
+  $("target").max = INIT.max_level;
+  if (!keepTarget || !(t > s.level)) $("target").value = Math.min(INIT.max_level, Math.ceil((s.level + 1) / 5) * 5 || s.level + 1);
+  const picks = [...new Set([s.level + 1, s.level + 5, s.level + 10, 50, 99].filter(v => v > s.level && v <= INIT.max_level))].sort((a, b) => a - b);
+  $("quick").innerHTML = picks.map(v => `<button data-v="${v}">${v - s.level <= 10 && ![50, 99].includes(v) ? "+" + (v - s.level) + " (" + v + ")" : v}</button>`).join("");
+  $("quick").querySelectorAll("button").forEach(b => b.onclick = () => { $("target").value = b.dataset.v; });
+  $("focusBox").hidden = s.combat;
+  $("combatBox").hidden = !s.combat;
+  if (!s.combat) {
+    const f = s.focus;
+    const lv = x => x.level > s.level ? ` (from level ${x.level})` : "";
+    $("cat").innerHTML = `<option value="">Anything</option>` + f.categories.map(c =>
+      `<option value="${esc(c.id)}">${c.sub ? "   " : ""}${esc(c.label)}${lv(c)}</option>`).join("");
+    const uses = f.uses.filter(u => !u.id.startsWith("skill:")), ingr = f.uses.filter(u => u.id.startsWith("skill:"));
+    $("use").innerHTML = `<option value="">Anything</option>` +
+      (uses.length ? `<optgroup label="Purpose">${uses.map(u => `<option value="${esc(u.id)}">${esc(u.label)}${lv(u)}</option>`).join("")}</optgroup>` : "") +
+      (ingr.length ? `<optgroup label="Feeds another skill">${ingr.map(u => `<option value="${esc(u.id)}">${esc(u.label)}${lv(u)}</option>`).join("")}</optgroup>` : "");
+    const saved = JSON.parse(store.get("focus:" + s.skill) || "{}");
+    if (saved.category && f.categories.some(c => c.id === saved.category)) $("cat").value = saved.category;
+    if (saved.use && f.uses.some(u => u.id === saved.use)) $("use").value = saved.use;
+  }
+  focusChanged();
+  loadoutNote();
+}
+
+function focusChanged() {
+  const s = cur();
+  if (!s || s.combat) return;
+  const c = s.focus.categories.find(x => x.id === $("cat").value), u = s.focus.uses.find(x => x.id === $("use").value);
+  store.set("focus:" + s.skill, JSON.stringify({category: $("cat").value, use: $("use").value}));
+  const parts = [];
+  if (c) parts.push(`${c.count} recipe${c.count === 1 ? "" : "s"} in ${esc(c.label)}`);
+  if (u) parts.push(`${u.count} that make ${esc(u.label.toLowerCase())}`);
+  const first = Math.max(c ? c.level : 0, u ? u.level : 0);
+  $("focusNote").innerHTML = !parts.length ? "Any action in the skill can be picked."
+    : parts.join(" · ") + (first > s.level ? `. <span class="warnline">The first unlocks at level ${first}; until then the best action overall is used.</span>` : ".");
+}
+
+function loadoutNote() {
+  const l = INIT.loadouts[+$("loadout").value];
+  if (!l) { $("loadoutNote").textContent = ""; return; }
+  $("loadoutNote").innerHTML = [l.weapon ? esc(l.weapon) : "<span class='warnline'>No weapon</span>",
+    l.food ? `${l.food_qty.toLocaleString()} ${esc(l.food)}` : "no food",
+    `${l.prayers} prayer${l.prayers === 1 ? "" : "s"} active`].join(" · ");
+}
+
+$("skill").onchange = () => skillChanged(false);
+$("cat").onchange = focusChanged;
+$("use").onchange = focusChanged;
+$("loadout").onchange = loadoutNote;
+$("target").onkeydown = ev => { if (ev.key === "Enter") plan(); };
+$("go").onclick = () => plan();
+$("reload").onclick = async () => {
+  $("status").textContent = "Re-reading your save…";
+  try { INIT = await api("/api/planner/reload", {}); renderSkills(true); $("status").textContent = "Save reloaded."; }
+  catch (e) { $("status").textContent = "Reload failed: " + e.message; }
+};
+
+// ------------------------------------------------------------------ plan
+async function plan() {
+  const s = cur();
+  const target = parseInt($("target").value, 10);
+  if (!s) return;
+  if (!(target > s.level && target <= INIT.max_level)) {
+    $("status").innerHTML = `<span class="warnline">Pick a target between ${s.level + 1} and ${INIT.max_level}.</span>`;
+    return;
+  }
+  const body = {skill: s.skill, target};
+  if (s.combat) body.setup = (INIT.loadouts[+$("loadout").value] || {}).setup;
+  else { body.no_shop = $("noShop").checked; body.use_bank = $("useBank").checked; body.focus = {category: $("cat").value || null, use: $("use").value || null}; }
+  const my = ++seq;
+  $("go").disabled = true;
+  $("status").textContent = s.combat ? "Planning… each checkpoint simulates every enemy, so this can take a while." : "Planning…";
+  try {
+    const res = await api("/api/plan", body);
+    if (my !== seq) return;
+    PLAN = Object.assign(res, {combat: s.combat});
+    $("status").textContent = res.error ? "" : `Planned in ${res.seconds}s.`;
+    draw();
+  } catch (e) {
+    if (my !== seq) return;
+    $("status").textContent = "";
+    $("out").innerHTML = `<div class="card"><div class="banner bad">${esc(e.message)}</div></div>`;
+  } finally {
+    if (my === seq) $("go").disabled = false;
+  }
+}
+
+const KIND = {food: "food", rune: "rune", ammo: "ammo", prayer: "prayer", item: "item"};
+
+function suppliesCard(r) {
+  if (!r.combat) return "";
+  const pray = r.prayers && r.prayers.length ? `Prayers on: ${r.prayers.map(esc).join(", ")}.` : "No prayers on, so no prayer points are used.";
+  if (!r.supplies || !r.supplies.length)
+    return `<h3>Supplies</h3><div class="note">This route uses no food, runes, ammo or prayer points. ${pray}</div>`;
+  const rows = r.supplies.map(s => {
+    const status = s.runs_out
+      ? `<span class="tag bad">runs out after ${fmtH(s.runs_out.hours)} (level ${s.runs_out.level})</span>`
+      : `<span class="tag ok">enough${s.have > s.total ? ` (${cnt(s.have - s.total)} left)` : ""}</span>`;
+    return `<tr><td>${esc(s.name)}</td><td><span class="tag">${KIND[s.kind] || s.kind}</span></td><td class="num">${n(s.per_hr)}</td>
+      <td class="num"><b>${cnt(s.total)}</b></td><td class="num">${cnt(s.have)}</td><td>${status}</td></tr>`;
+  }).join("");
+  return `<h3>Supplies</h3><div class="note" style="margin-bottom:4px">${pray}</div>
+    <div class="scroll"><table><thead><tr><th>Item</th><th></th><th class="num">Per hour</th><th class="num">Needed</th><th class="num">You have</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function itemList(obj) {
+  return Object.entries(obj || {}).filter(([, q]) => q >= 0.5).sort((a, b) => b[1] - a[1])
+    .map(([k, q]) => `<b>${cnt(q)}</b> ${esc(k)}`).join(", ");
+}
+
+function stepBody(g, r) {
+  if (r.combat) {
+    const names = Object.fromEntries((r.supplies || []).map(s => [s.id, s]));
+    const rows = [`<tr><td>Kills</td><td></td><td class="num"><b>${cnt(g.kills)}</b></td><td class="num muted">${n(g.kills / g.hours)} / hr</td></tr>`];
+    Object.entries(g.used || {}).sort((a, b) => b[1] - a[1]).forEach(([id, q]) => {
+      const s = names[id] || {name: id, kind: "item"};
+      rows.push(`<tr><td>${esc(s.name)}</td><td><span class="tag">${KIND[s.kind] || s.kind}</span></td>
+        <td class="num"><b>${cnt(q)}</b></td><td class="num muted">${n(q / g.hours)} / hr</td></tr>`);
+    });
+    const loot = itemList(g.loot);
+    return `<div class="scroll"><table><thead><tr><th>Uses</th><th></th><th class="num">This step</th><th class="num">Rate</th></tr></thead>
+      <tbody>${rows.join("")}</tbody></table></div>${loot ? `<div class="note" style="margin-top:6px">Loot: ${loot}</div>` : ""}`;
+  }
+  const rows = g.chain.map(c => `<tr class="${c.final ? "final" : ""}"><td><span class="tag">${esc(c.skill)}</span></td>
+    <td>${esc(c.name)}</td><td class="num">${cnt(c.times)}×</td><td>${itemList(c.makes) || '<span class="muted">-</span>'}</td></tr>`).join("");
+  const bought = itemList(g.bought), stock = itemList(g.from_bank);
+  return `<div class="scroll"><table><thead><tr><th>Skill</th><th>Action</th><th class="num">Times</th><th>Makes</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${stock ? `<div class="note" style="margin-top:6px">Take from your bank: ${stock}</div>` : ""}
+    ${bought ? `<div class="note" style="margin-top:6px">Buy from the shop: ${bought}</div>` : ""}`;
+}
+
+function draw() {
+  const r = PLAN;
+  if (r.error) { $("out").innerHTML = `<div class="card"><div class="banner bad">${esc(r.error)}</div></div>`; return; }
+  let run = 0;
+  const steps = r.segments.map((g, i) => {
+    run += g.hours;
+    const rate = Math.abs(g.xp_hr_end - g.xp_hr_start) / g.xp_hr_start > 0.02 ? `${n(g.xp_hr_start)}→${n(g.xp_hr_end)}` : n(g.xp_hr);
+    const tags = [];
+    if (g.outside_focus) tags.push('<span class="tag warn">outside your focus</span>');
+    if (g.area) tags.push(`<span class="tag">${esc(g.area)}</span>`);
+    const other = Object.entries(g.xp).filter(([k, v]) => k !== r.skill && v >= 1).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${esc(k)} +${n(v)} XP`).join(" · ");
+    return `<div class="step${g.outside_focus ? " off" : ""}">
+      <div class="stephead">
+        <div class="lvl">${g.from} → ${g.to}<small>Step ${i + 1}</small></div>
+        <div><b>${esc(g.name)}</b> ${tags.join(" ")}</div>
+        <div class="stat hide-sm"><small>XP / hr</small>${rate}</div>
+        <div class="stat"><small>Time</small>${fmtH(g.hours)}</div>
+        <div class="stat hide-sm"><small>Total</small>${fmtH(run)}</div>
+      </div>
+      <div class="stepbody">${stepBody(g, r)}${other ? `<div class="note" style="margin-top:6px">Also earns: ${other}</div>` : ""}</div>
+    </div>`;
+  }).join("");
+  const banners = [];
+  if (r.stuck) banners.push(`<div class="banner bad">Stopped at level ${r.reached}: ${esc(r.stuck)}</div>`);
+  (r.notes || []).forEach(t => banners.push(`<div class="banner ${/Top up/.test(t) ? "bad" : "warn"}">${esc(t)}</div>`));
+  const kpi4 = r.combat
+    ? `<div class="kpi"><div class="v">${n(r.kills)}</div><div class="l">Kills</div></div>`
+    : `<div class="kpi"><div class="v">${n(r.gp)}</div><div class="l">GP value made</div></div>`;
+  const totals = [];
+  if (r.made && r.made.length) totals.push(`<div><h3>You end up with</h3><div class="note">${r.made.map(x => `<b>${cnt(x.qty)}</b> ${esc(x.item)}`).join(", ")}</div></div>`);
+  if (r.from_bank && r.from_bank.length) totals.push(`<div><h3>Taken from your bank and earlier steps</h3><div class="note">${r.from_bank.slice(0, 14).map(x => `<b>${cnt(x.qty)}</b> ${esc(x.item)}`).join(", ")}</div></div>`);
+  if (r.bought && r.bought.length) totals.push(`<div><h3>Total bought from the shop</h3><div class="note">${r.bought.map(x => `<b>${cnt(x.qty)}</b> ${esc(x.item)}`).join(", ")}</div></div>`);
+  if (r.loot && r.loot.length) totals.push(`<div><h3>Total loot</h3><div class="note">${r.loot.slice(0, 10).map(x => `<b>${cnt(x.qty)}</b> ${esc(x.item)}`).join(", ")}</div></div>`);
+  if (r.other_levels.length) totals.push(`<div><h3>Other skills you level on the way</h3><div class="chips">${r.other_levels.map(o => `<span class="tag ok">${esc(o.skill)} ${o.from} → ${o.to}</span>`).join("")}</div></div>`);
+  $("out").innerHTML = `<div class="card">
+    <h2>${esc(r.skill)} ${r.from} → ${r.reached}${r.reached < r.to ? ` <span class="muted small">(aimed for ${r.to})</span>` : ""}
+      ${r.focus ? `<span class="tag ok">${esc(r.focus)}</span>` : ""}</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v">${fmtH(r.hours)}</div><div class="l">Total time${r.hours >= 48 ? ` (${n(r.hours)} h)` : ""}</div></div>
+      <div class="kpi"><div class="v">${n(r.xp_needed)}</div><div class="l">${esc(r.skill)} XP needed</div></div>
+      <div class="kpi"><div class="v">${r.segments.length}</div><div class="l">Step${r.segments.length === 1 ? "" : "s"}</div></div>
+      ${kpi4}
+    </div>
+    ${banners.join("")}
+    ${suppliesCard(r)}
+    <h3>Route</h3>
+    ${steps}
+    ${totals.length ? `<div class="two">${totals.join("")}</div>` : ""}
+  </div>`;
+}
+
+function intro() {
+  $("out").innerHTML = `<div class="card empty"><h2>Plan a route</h2><p class="muted small">Pick a skill and a target level on the left, then press <b>Plan route</b>.<br>
+    Use the focus to level a certain way, for example Fletching by making arrows, or Runecrafting by making runes.</p></div>`;
+}
+
+(async () => {
+  try { INIT = await api("/api/planner/init"); }
+  catch (e) { $("out").innerHTML = `<div class="card"><div class="banner bad">Could not load: ${esc(e.message)}</div></div>`; return; }
+  $("who").textContent = INIT.character;
+  renderSkills(false);
+  intro();
+})();
+</script>
+</body>
+</html>

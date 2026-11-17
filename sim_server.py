@@ -1,5 +1,8 @@
-"""Combat simulator: a local web page for trying equipment, stance, spell,
-prayers, food and levels against one enemy or a Slayer master's auto-slayer.
+"""Local web pages built on your save:
+
+  /         combat simulator: try equipment, stance, spell, prayers, food and levels
+            against one enemy or a Slayer master's auto-slayer
+  /planner  levelling planner: the fastest route to a target level in any skill
 
     python -I sim_server.py            # opens http://127.0.0.1:8765
     python -I sim_server.py --port 9000 --no-browser
@@ -22,11 +25,14 @@ sys.path.insert(0, str(ROOT))  # sibling modules, also under python -I
 
 import calculator as calc  # noqa: E402
 import combat as cmb       # noqa: E402
+import planner as plan_mod  # noqa: E402
+import game_api             # noqa: E402
 
 NS = cmb.NS
 short = cmb.short
 HOUR = 3_600_000
 PAGE = ROOT / "sim.html"
+PLANNER_PAGE = ROOT / "planner.html"
 
 
 class World:
@@ -48,6 +54,9 @@ class World:
         self.bonuses = calc.Bonuses(self.active, False)
         self.items = calc.objects("Item")
         self.init_payload = None
+        self.planner = plan_mod.Planner(self)
+        if not hasattr(self, "game"):
+            self.game = game_api.GameViews(self)   # view models for the in-game panel
 
     # ---------------------------------------------------------------- helpers
     def xp_mult(self, skill):
@@ -193,6 +202,18 @@ class World:
         }
         return self.init_payload
 
+    def planner_init(self):
+        st = self.state
+        loadouts = []
+        for lid in cmb.loadout_ids(st):
+            s = cmb.setup_from_state(st, lid)
+            w = (s["equipment"].get("Weapon") or {}).get("item")
+            loadouts.append({"setup": s, "name": s["name"], "worn": s["worn"], "weapon": self.name(w) if w else None,
+                             "food": self.name(s["food"]) if s.get("food") else None, "food_qty": s.get("food_qty", 0),
+                             "prayers": len(s.get("prayers") or [])})
+        return {"character": st["header"]["character"], "skills": self.planner.skills(),
+                "max_level": plan_mod.MAX_LEVEL, "loadouts": loadouts}
+
     # ---------------------------------------------------------------- results
     def summarize(self, r):
         """A fight rate dict -> per-hour figures for the page."""
@@ -206,8 +227,8 @@ class World:
             "xp_hr": {k: v * kph for k, v in r["xp_split"].items()}, "xp_hr_total": r["xp"] * kph,
             "gp_hr": sum(x["gp_hr"] for x in loot) + coins, "coins_hr": coins,
             "other_currency_hr": {short(k): v * kph for k, v in r["currency"].items() if k != NS + "GoldPieces"},
-            "loot": loot, "uses": sorted(({"item": self.name(i), "per_hr": n * kph} for i, n in r["inputs"].items()),
-                                         key=lambda x: -x["per_hr"]),
+            "loot": loot, "uses": sorted(({"item": self.name(i), "id": i, "per_hr": n * kph, "gp_hr": n * kph * self.price(i)}
+                                          for i, n in r["inputs"].items()), key=lambda x: -x["per_hr"]),
             "combat": r["combat"], "note": r.get("note"), "detail": r["detail"],
         }
 
@@ -288,11 +309,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html", "/combat"):
             return self.send(200, PAGE.read_bytes(), "text/html; charset=utf-8")
-        if self.path == "/api/init":
+        if path == "/planner":
+            return self.send(200, PLANNER_PAGE.read_bytes(), "text/html; charset=utf-8")
+        if path == "/api/init":
             with WORLD.lock:
                 return self.send(200, WORLD.init())
+        if path == "/api/planner/init":
+            with WORLD.lock:
+                return self.send(200, WORLD.planner_init())
+        if path in ("/api/game/init", "/api/game/gear"):
+            try:
+                with WORLD.lock:
+                    if path.endswith("gear"):
+                        return self.send(200, WORLD.game.gear())
+                    return self.send(200, WORLD.game.init(reload="reload=1" in self.path))
+            except Exception as ex:
+                import traceback
+                traceback.print_exc()
+                return self.send(500, {"error": f"{type(ex).__name__}: {ex}"})
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -302,6 +339,29 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/simulate":
                 with WORLD.lock:
                     return self.send(200, WORLD.simulate(req))
+            if self.path == "/api/game/view":
+                with WORLD.lock:
+                    return self.send(200, WORLD.game.view(req.get("view"), req.get("params")))
+            if self.path == "/api/game/compare":
+                with WORLD.lock:
+                    return self.send(200, WORLD.game.compare(req))
+            if self.path == "/api/game/reload":
+                with WORLD.lock:
+                    return self.send(200, WORLD.game.force_reload())
+            if self.path == "/api/planner/reload":
+                with WORLD.lock:
+                    WORLD.reload()
+                    return self.send(200, WORLD.planner_init())
+            if self.path == "/api/plan":
+                with WORLD.lock:
+                    try:
+                        res = WORLD.planner.plan(req["skill"], req["target"], bool(req.get("no_shop")),
+                                                 req.get("setup"), req.get("focus"), bool(req.get("use_bank")),
+                                                 bool(req.get("assume_tools")), req.get("food") or None,
+                                                 int(req.get("stealth") or 0))
+                    except ValueError as ex:
+                        res = {"error": str(ex)}
+                    return self.send(200, res)
             if self.path == "/api/reload":
                 with WORLD.lock:
                     WORLD.reload()
@@ -313,22 +373,88 @@ class Handler(BaseHTTPRequestHandler):
             self.send(500, {"error": f"{type(ex).__name__}: {ex}"})
 
 
+def process_alive(pid):
+    """Is another process still running? (os.kill(pid, 0) is not safe on Windows: it terminates the process.)"""
+    if sys.platform == "win32":
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+        if not handle:
+            return False
+        alive = ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT: still running
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return alive
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def exit_with(pid, srv):
+    """Stop the server once process `pid` (the game, when the in-game panel started us) has gone."""
+    import time
+    while process_alive(pid):
+        time.sleep(5)
+    srv.shutdown()
+
+
+class Server(ThreadingHTTPServer):
+    """One server per port. Python's HTTP server sets SO_REUSEADDR, which on Windows lets a second process
+    bind the same port silently; use an exclusive bind there so a second copy fails and hands over."""
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self):
+        import socket
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def write_ready(path, port, pid):
+    """Tell the in-game panel the server is listening (it waits for this file instead of probing the port,
+    because a refused connection on Windows takes about 2 seconds to fail)."""
+    import os
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(json.dumps({"port": port, "pid": pid}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def main():
     global WORLD
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--exit-with", type=int, metavar="PID", help="stop when this process exits (used by the in-game panel)")
+    ap.add_argument("--ready-file", metavar="PATH", help="write this file once listening (used by the in-game panel)")
     args = ap.parse_args()
+    try:
+        srv = Server(("127.0.0.1", args.port), Handler)
+    except OSError as ex:
+        # Port taken: usually a server that is already running, so let the panel use that one.
+        if args.ready_file:
+            write_ready(args.ready_file, args.port, None)
+        sys.exit(f"port {args.port} is in use ({ex}); is sim_server.py already running?")
     WORLD = World()
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    if args.exit_with:
+        threading.Thread(target=exit_with, args=(args.exit_with, srv), daemon=True).start()
+    if args.ready_file:
+        import os
+        write_ready(args.ready_file, args.port, os.getpid())
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"Combat simulator for {WORLD.state['header']['character']}: {url}  (Ctrl+C to stop)")
+    print(f"Combat simulator for {WORLD.state['header']['character']}: {url}")
+    print(f"Levelling planner: {url}planner  (Ctrl+C to stop)")
     if not args.no_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if args.ready_file:
+            Path(args.ready_file).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

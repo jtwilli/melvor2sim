@@ -23,6 +23,7 @@ from pathlib import Path
 
 NS = "MelvorBase:"
 SPAWN_MS = 3000
+MIN_KILLS = 40              # kills always simulated before a time budget may cut a fight short
 KILLS = 300                 # simulated kills per fight
 FIGHT_CAP_MS = 900_000      # a single kill taking longer than this is "not viable"
 SURVIVE_CAP_MS = 4 * 3_600_000
@@ -61,6 +62,29 @@ def total(mods, stat, **q):
         else:
             t += m["value"]
     return t
+
+
+def rate_ranges(samples, batches=10):
+    """95% range of the per-hour rates, as a fraction of the rate (0.03 = plus or minus 3%).
+    samples: (fight ms, damage XP) per kill. Uses batch means, so it needs no assumption about one kill."""
+    n = len(samples) // batches
+    if n < 2:
+        return {"xp": None, "kills": None}
+    xp_rates, kill_rates = [], []
+    for b in range(batches):
+        chunk = samples[b * n:(b + 1) * n]
+        ms = sum(s[0] for s in chunk) + SPAWN_MS * len(chunk)
+        xp_rates.append(sum(s[1] for s in chunk) / ms)
+        kill_rates.append(len(chunk) / ms)
+
+    def half_width(vals):
+        mean = sum(vals) / len(vals)
+        if mean <= 0:
+            return None
+        var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+        return 1.96 * math.sqrt(var / len(vals)) / mean
+
+    return {"xp": half_width(xp_rates), "kills": half_width(kill_rates)}
 
 
 # ---------------------------------------------------------------- setups
@@ -462,13 +486,18 @@ class Fight:
 class Combat:
     """Fights for one setup (gear, stance, spell, prayers, food, level overrides)."""
 
-    def __init__(self, tables, state, reqs, items, active_bonuses, xp_multiplier, setup=None, label=None):
+    def __init__(self, tables, state, reqs, items, active_bonuses, xp_multiplier, setup=None, label=None,
+                 kills=KILLS):
         setup = setup or setup_from_state(state)
         self.setup = setup
+        self.kills = kills   # simulated kills per fight; fewer is faster but noisier
+        self.sim_budget_ms = None   # optional cap on simulated time per fight (after MIN_KILLS), for quick comparisons
         self.state, self.reqs, self.items, self.xp_mult = state, reqs, items, xp_multiplier
         self.label = label if label is not None else setup.get("name")
         O = lambda n: _objects(tables, n)
         self.areas, self.enemies, self.stances = O("CombatArea"), O("Enemy"), O("AttackStance")
+        self.dungeons = {k: d for k, d in O("Dungeon").items()
+                         if not any(short(r["Type"]) == "DemoLocked" for r in d.get("UnlockRequirements") or [])}
         self.styles, self.spells, self.weapon_types = O("CombatStyle"), O("MagicSpell"), O("WeaponType")
         self.attacks, self.passives, self.combat_stats = O("Attack"), O("CombatPassive"), O("CombatStat")
         self.prayers, self.masters = O("Prayer"), O("SlayerMaster")
@@ -535,7 +564,8 @@ class Combat:
                          "cond": bool(b.get("condition") or b.get("scaling") or b.get("from_context"))})
 
         # ---- prayers ----
-        self.active_prayers, self.prayer_cost, self.prayer_per_turn = [], 0, 0
+        self.active_prayers, self.prayer_cost = [], 0
+        prayer_drains = []   # (prayer id, base cost, "Player"|"Enemy": whose attack turn drains it)
         for pid in setup.get("prayers") or []:
             p = self.prayers.get(pid)
             if not p:
@@ -545,8 +575,8 @@ class Combat:
             cost = (p.get("Cost") or {}).get("Quantity", 0)
             self.prayer_cost += cost
             on = p.get("ConsumesOn") or {}
-            if short(on.get("Type")) == "AttackTurn" and (on.get("Data") or {}).get("Character", {}).get("Component") == "Player":
-                self.prayer_per_turn += cost
+            if short(on.get("Type")) == "AttackTurn":
+                prayer_drains.append((pid, cost, (on.get("Data") or {}).get("Character", {}).get("Component")))
 
         # ---- food (its bonuses apply while you have it) ----
         self.food_item = setup.get("food")
@@ -557,6 +587,14 @@ class Combat:
 
         self.skipped_mods = sum(1 for m in mods if m["cond"])
         self.base_mods = [m for m in mods if not m["cond"]]
+        # prayer points drained per player attack turn and per enemy attack turn
+        self.prayer_per_turn = self.prayer_per_enemy_turn = 0
+        for pid, cost, side in prayer_drains:
+            c = max(0, cost + total(self.base_mods, "FlatPrayerCost", Prayer=pid))
+            if side == "Enemy":
+                self.prayer_per_enemy_turn += c
+            else:
+                self.prayer_per_turn += c
         self.loot = {k: total(self.base_mods, k) for k in ("ItemDoublingChance", "CurrencyDoublingChance", "FlatLight")}
         self.food = None
         if fcap:
@@ -631,7 +669,7 @@ class Combat:
         return None
 
     # ------------------------------------------------------------ main
-    def rates(self, only_enemies=None, stances=None):
+    def rates(self, only_enemies=None, stances=None, survival=True):
         out, skipped = {}, {"locked area": 0, "unverified requirement": 0}
         if not self.weapon or not self.weapon_type:
             return out, {"no weapon equipped": 1}
@@ -655,7 +693,7 @@ class Combat:
                 if not self.enemy_playable(enemy):
                     continue
                 for sid in stances or self.weapon_type["Stances"]:
-                    r = self.fight(aid, eid, sid)
+                    r = self.fight(aid, eid, sid, survival)
                     if r:
                         out[r["key"]] = r
                     else:
@@ -664,7 +702,8 @@ class Combat:
 
     def fight(self, aid, eid, sid, survival=True):
         """One enemy, one stance: a rate dict (same shape as skilling actions) or None if not viable."""
-        area, enemy = self.areas[aid], self.enemies[eid]
+        in_dungeon = aid in self.dungeons          # a dungeon works as the area: its darkness, effect and passives apply
+        area, enemy = (self.dungeons[aid] if in_dungeon else self.areas[aid]), self.enemies[eid]
         stance = self.stances[sid]
         magic = short(stance["CombatStyle"]) == "Magic"
         stats, spell, spell_saved = dict(self.stats), None, False
@@ -718,14 +757,22 @@ class Combat:
         player, foe = build()
         sim = Fight(self, player, foe, random.Random(seed), self.food)   # unlimited food: measures eating
         total_ms, kills = 0.0, 0
-        for _ in range(KILLS):
+        samples = []                      # (fight ms, damage XP) per kill, for the uncertainty range
+        for _ in range(self.kills):
+            before = sim.dmg_xp
             ms = sim.kill()
             if ms is None:
                 break
             total_ms += ms
             kills += 1
-        if kills < KILLS:
+            samples.append((ms, sim.dmg_xp - before))
+            if self.sim_budget_ms and kills >= MIN_KILLS and total_ms > self.sim_budget_ms:
+                break           # a slow matchup: enough kills for a rate, stop spending time on it
+        else:
+            ms = 0
+        if ms is None:
             return None
+        ci = rate_ranges(samples)
         fight_ms = total_ms / kills
         ms = fight_ms + SPAWN_MS
         kills_hr = 3_600_000 / ms
@@ -791,18 +838,9 @@ class Combat:
             currency[on_task[0]["RewardCurrency"]] = max(1, int(0.1 * hp ** 1.15))
 
         # ---- drops ----
-        drops = enemy.get("Drops") or {}
-        idbl, cdbl = 1 + min(1, self.loot["ItemDoublingChance"]), 1 + min(1, self.loot["CurrencyDoublingChance"])
         outputs = {}
-        for d in drops.get("FixedItems") or []:
-            outputs[d["Item"]] = outputs.get(d["Item"], 0) + (d["MinQuantity"] + d["MaxQuantity"]) / 2 * idbl
-        for tb in drops.get("ItemTables") or []:
-            tw = sum(x["Weight"] for x in tb["Table"]) or 1
-            for x in tb["Table"]:
-                q = tb["Chance"] * x["Weight"] / tw * (x["MinQuantity"] + x["MaxQuantity"]) / 2 * idbl
-                outputs[x["Item"]] = outputs.get(x["Item"], 0) + q
-        for c in drops.get("FixedCurrencies") or []:
-            currency[c["Currency"]] = currency.get(c["Currency"], 0) + (c["MinQuantity"] + c["MaxQuantity"]) / 2 * cdbl
+        if not in_dungeon:                          # enemies inside a dungeon drop nothing; the run pays out at the end
+            self.add_drops(enemy.get("Drops") or {}, outputs, currency)
 
         # ---- consumables per kill ----
         inputs = {}
@@ -843,9 +881,110 @@ class Combat:
                         area=area["DisplayName"], area_id=aid, enemy=name, enemy_id=eid, stance=stance["DisplayName"],
                         stance_id=sid, your_stance=yours,
                         spell=spell["DisplayName"] if spell else None, your_spell=spell_saved,
-                        prayers=list(self.active_prayers), prayer_points=self.prayer_per_turn * casts,
-                        food=self.food_item, on_task=bool(on_task), survival=surv,
+                        prayers=list(self.active_prayers),
+                        prayer_points=self.prayer_per_turn * casts + self.prayer_per_enemy_turn * sim.e_turns / kills,
+                        food=self.food_item, on_task=bool(on_task), survival=surv, ci=ci,
                         unsimulated=sorted(sim.unsim)))
+
+    def add_drops(self, drops, outputs, currency):
+        """Expected items and currencies from one drop table (an enemy's drops, or a dungeon's rewards)."""
+        idbl, cdbl = 1 + min(1, self.loot["ItemDoublingChance"]), 1 + min(1, self.loot["CurrencyDoublingChance"])
+        for d in drops.get("FixedItems") or []:
+            outputs[d["Item"]] = outputs.get(d["Item"], 0) + (d["MinQuantity"] + d["MaxQuantity"]) / 2 * idbl
+        for tb in drops.get("ItemTables") or []:
+            tw = sum(x["Weight"] for x in tb["Table"]) or 1
+            for x in tb["Table"]:
+                q = tb["Chance"] * x["Weight"] / tw * (x["MinQuantity"] + x["MaxQuantity"]) / 2 * idbl
+                outputs[x["Item"]] = outputs.get(x["Item"], 0) + q
+        for c in drops.get("FixedCurrencies") or []:
+            currency[c["Currency"]] = currency.get(c["Currency"], 0) + (c["MinQuantity"] + c["MaxQuantity"]) / 2 * cdbl
+
+    # ------------------------------------------------------------ dungeons
+    def dungeon_unlocked(self, did):
+        """True / False / None (a requirement the save cannot confirm). Kill-count requirements are checked
+        against the save's loot history."""
+        result = True
+        history = self.state.get("loot_history") or {}
+        for r in self.dungeons[did].get("UnlockRequirements") or []:
+            data = r.get("Data") or {}
+            if short(r["Type"]) == "EnemyStatistic" and short(data.get("Statistic")) == "CombatEnemyKilled":
+                if (history.get(data.get("Enemy")) or {}).get("kills", 0) < data.get("Value", 1):
+                    return False
+                continue
+            ok = self.reqs.check_raw(r)[0]
+            if ok is False:
+                return False
+            if ok is None:
+                result = None
+        return result
+
+    def dungeon_waves(self, did):
+        """[(enemy id, expected number fought per run)] in fight order."""
+        out = []
+        for wave in self.dungeons[did]["Enemies"]:
+            tw = sum(e["Weight"] for e in wave["Enemies"]) or 1
+            for e in wave["Enemies"]:
+                out.append((e["Enemy"], wave["Count"] * e["Weight"] / tw))
+        return out
+
+    def dungeon(self, did, sid, survival=False):
+        """One full run of a dungeon in one stance, as a rate dict (ms is the time per run), or None if any
+        enemy in it cannot be killed. Each enemy type is simulated on its own and the results are added in
+        run order; rewards are granted once per run."""
+        d = self.dungeons[did]
+        ms, xp_split, inputs, currency, outputs = 0.0, {}, {}, {}, {}
+        kills, taken, prayer, attacks, deaths, food = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        parts, var = [], 0.0
+        for eid, n in self.dungeon_waves(did):
+            r = self.fight(did, eid, sid, survival) if eid in self.enemies else None
+            if r is None:
+                return None
+            c = r["combat"]
+            ms += n * r["ms"]
+            kills += n
+            for k, v in r["xp_split"].items():
+                xp_split[k] = xp_split.get(k, 0.0) + n * v
+            for k, v in r["inputs"].items():
+                inputs[k] = inputs.get(k, 0.0) + n * v
+            for k, v in r["currency"].items():
+                currency[k] = currency.get(k, 0.0) + n * v
+            taken += n * c["damage_taken"]
+            prayer += n * c["prayer_points"]
+            attacks += n * c["attacks"]
+            kph = 3_600_000 / r["ms"]
+            deaths += n * c["survival"]["deaths_per_hr"] / kph
+            food += n * c["survival"]["food_per_hr"] / kph
+            parts.append((n * r["ms"], r))
+        self.add_drops(d.get("Rewards") or {}, outputs, currency)
+        runs_hr = 3_600_000 / ms
+        # the run's range: each part's range weighted by its share of the run's time
+        ci = {}
+        for key in ("xp", "kills"):
+            var = sum(((t / ms) * ((r["combat"].get("ci") or {}).get(key) or 0.0)) ** 2 for t, r in parts)
+            ci[key] = math.sqrt(var)
+        weighted = lambda f: sum(t * f(r["combat"]) for t, r in parts) / ms
+        boss = parts[-1][1]["combat"]
+        stance = self.stances[sid]
+        surv = dict(food_per_hr=food * runs_hr, deaths_per_hr=deaths * runs_hr, food=self.food_item, food_qty=self.food_qty,
+                    food_heal=(self.food or {}).get("heal"), auto_eat_at=boss["survival"]["auto_eat_at"],
+                    hours_food_lasts=(self.food_qty / (food * runs_hr)) if food > 0 and self.food else None,
+                    minutes_after_food=None, minutes_without_food=None,
+                    verdict="death" if deaths > 0 or (taken > 0 and not self.food) else "eats" if food > 0 else "safe")
+        return dict(
+            key=f"Dungeon/{short(did)}/{short(sid)}/{self.label or 'worn'}", skill="Combat",
+            name=f"{d['DisplayName']} ({stance['DisplayName']})", loadout=self.label, enemy=d["DisplayName"], enemy_id=did,
+            area="Dungeon", stance=stance["DisplayName"], level_req=1, ms=ms, xp=sum(xp_split.values()), xp_split=xp_split,
+            inputs=inputs, outputs=outputs, currency=currency, detail=f"{kills:.0f} enemies per run", note=None,
+            combat=dict(hit=weighted(lambda c: c["hit"]), min_hit=boss["min_hit"], max_hit=boss["max_hit"],
+                        interval=boss["interval"], hp=sum(r["combat"]["hp"] for _, r in parts), armour=boss["armour"],
+                        ward=boss["ward"], attacks=attacks, damage_taken=taken, player_hp=boss["player_hp"],
+                        enemy_hit=weighted(lambda c: c["enemy_hit"]),
+                        enemy_max_hit=max(r["combat"]["enemy_max_hit"] for _, r in parts), stunned_share=0.0,
+                        area="Dungeon", area_id=did, enemy=d["DisplayName"], enemy_id=did, stance=stance["DisplayName"],
+                        stance_id=sid, your_stance=self.saved_stance == sid, spell=boss["spell"], your_spell=boss["your_spell"],
+                        prayers=list(self.active_prayers), prayer_points=prayer, food=self.food_item, on_task=False,
+                        survival=surv, ci=ci, unsimulated=sorted({u for _, r in parts for u in r["combat"]["unsimulated"]}),
+                        dungeon=True, enemies_per_run=kills))
 
     # ------------------------------------------------------------ auto-slayer
     def master_enemies(self, mid):
