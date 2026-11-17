@@ -8,8 +8,8 @@ levels, your equipment, your upgrades, your mastery and every other bonus you ha
 active. You can use it three ways:
 
 1. **An XP button inside the game.** It opens a panel over the game with every
-   tool in tabs: best XP and gold, a levelling planner, production per hour, a
-   loadout comparison and a drop-chance calculator. See
+   tool in tabs: best XP and gold, a levelling planner, production per hour, every way
+   to boost a skill, a loadout comparison and a drop-chance calculator. See
    [The in-game panel](#the-in-game-panel).
 2. **A report**: an HTML page you open in your browser. It ranks the best XP/hour
    and GP/hour for every skill you can train right now, plus combat for each of
@@ -286,6 +286,29 @@ while, and **Open in browser** opens the browser pages.
 - **Include combat drops:** also ranks enemies that drop the item, fought with a
   loadout you choose.
 
+**Boost?**
+
+- Pick a skill to see everything that boosts it: toolbelt items, potions, food,
+  shop upgrades, Mastery Guild ranks, Astrology nodes, pets, equipment sets and
+  temporary events. They're grouped by type and sorted by the level you need in
+  other skills to get them.
+- For each one: the **boost** in words, its **effect** on your current best action
+  in the skill (for example *+8% XP, +8% items on Yew Tree*), **how to get it** and
+  **how long that takes you**:
+  - **Thieving drop:** the NPC and the chance per pickpocket.
+  - **Combat drop:** the enemy, its area, the chance per kill and kills per hour
+    with the loadout chosen at the top.
+  - **Recipe:** the recipe, timed with its full ingredient chain.
+  - **Shop:** the price. Gold is turned into time at your best gold rate, and item
+    costs at their fastest chain time.
+  - **Also:** opening containers, upgrades, quest rewards, mastery points,
+    Astrology knowledge and pets.
+
+  Drops also show how long it takes to be 90% sure of getting one.
+- **Grey rows** need a level, item or rank you don't have yet, and the **Needs**
+  column says what. **Green names** are boosters you already have.
+- Filter by type, or hide the ones you have.
+
 **Compare loadouts**
 
 - Two setups side by side, A and B, starting from your saved loadouts. Change gear
@@ -561,6 +584,7 @@ If the in-game panel stops appearing after an update, run
 | `planner.py` | Levelling routes and look-ahead |
 | `sim_server.py` | Local server for the browser pages and the in-game panel |
 | `game_api.py` | What each panel tab shows, ready to draw |
+| `boosters.py` | Finds every booster for a skill and how to get it (the Boost? tab) |
 | `sim.html`, `planner.html` | The combat simulator and levelling planner pages |
 | `install_mod.py` | Installs, checks or removes the in-game panel |
 | `mod/` | The in-game panel's scripts: `loader.gd` adds the button, `panel.gd` the panel, `tab_*.gd` the tabs |

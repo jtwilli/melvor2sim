@@ -5,7 +5,8 @@ extends CanvasLayer
 
 const DIR := "user://melvor2sim"
 const TABS := [["best", "Best XP / GP", "tab_best.gd"], ["plan", "Levelling planner", "tab_plan.gd"],
-	["produce", "Production", "tab_produce.gd"], ["compare", "Compare loadouts", "tab_compare.gd"],
+	["produce", "Production", "tab_produce.gd"], ["boost", "Boost?", "tab_boost.gd"],
+	["compare", "Compare loadouts", "tab_compare.gd"],
 	["math", "Maths", "tab_math.gd"]]
 const WAIT_STEP := 0.2        # seconds between checks for the server's ready file
 const WAIT_LIMIT := 150       # 30 s

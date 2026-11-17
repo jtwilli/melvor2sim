@@ -209,6 +209,19 @@ conditions or scaling.
 - Item events give `base + uniform(0, Astrology level × scaling)` items (average used), doubled with the event's
   ItemDoublingChance. Table events pick one of their events by weight. Bonus events (temporary buffs) are not counted.
 
+## Boosters (the panel's "Boost?" tab)
+
+- A booster is any source whose bonus rows target the skill (or every skill, for global XP and interval bonuses).
+- Effect: your current best action in the skill is recomputed with the booster's unconditional bonus rows added;
+  the change in XP per ms and in items per ms is shown.
+- Time to get one:
+  - recipe or pickpocket: the action's full chain time ÷ items per completion;
+  - combat drop: simulated ms per kill with the chosen loadout ÷ expected drops per kill;
+  - shop: gold ÷ your best gold per hour, plus each item cost (less what is in your bank) × its fastest chain
+    time;
+  - pet: `ScaleFactor` XP (the average XP per pet) ÷ your best XP per hour in that skill.
+- For drops, "90% within" uses `ln(10) / p` tries (a geometric wait), i.e. about 2.3 × the average time.
+
 ## Levels and the levelling planner
 
 - XP to reach level L = `floor(Σ_{l=1}^{L-1} floor(l + 300 × 2^(l/7)) / 4)` (level 2 = 83 XP, 99 = 13,034,431).

@@ -10,6 +10,7 @@ import time
 
 import calculator as calc
 import combat as cmb
+import boosters as boost_mod
 import planner as plan_mod
 
 NS = cmb.NS
@@ -56,6 +57,7 @@ class GameViews:
         self._actions = None            # every action, quest ones included (the planner leaves those out)
         self._quest_defs = None
         self._names = None
+        self._boosters = None
 
     # ------------------------------------------------------------ init
     def init(self, reload=False):
@@ -288,7 +290,7 @@ class GameViews:
 
     def view(self, name, params):
         fn = {"best": self.best, "plan": self.plan, "combat": self.combat, "ahead": self.ahead,
-              "produce": self.produce, "produce_items": self.produce_items}.get(name)
+              "produce": self.produce, "produce_items": self.produce_items, "boost": self.boost}.get(name)
         if not fn:
             return {"title": "", "banners": [{"kind": "bad", "text": f"Unknown view {name!r}"}], "kpis": [], "tables": []}
         try:
@@ -725,6 +727,49 @@ class GameViews:
         if not item:
             banners.insert(0, {"kind": "ok", "text": "Pick an item to see the fastest way to make it."})
         return {"title": title, "kpis": kpis, "banners": banners, "tables": tables}
+
+
+    # ------------------------------------------------------------ Boost?
+    def boost(self, p):
+        """Every booster for one skill: what it gives, its effect on your best action, how to get it and how long."""
+        w, pl = self.w, self.w.planner
+        skill = p.get("skill")
+        if not skill:
+            raise ValueError("Pick a skill.")
+        gold = NS + "GoldPieces"
+        if self._boosters is None:
+            self._boosters = boost_mod.Boosters(w, self._all_actions())
+        pl.reqs.state = w.state
+        pl.rates.state, pl.rates.reqs = w.state, pl.reqs
+        rates, passive, _ = calc.action_rates(pl.actions, w.state, w.bonuses, pl.reqs, pl.rates)
+        sources = calc.zero_time_sources(pl.reqs, gold, passive_rows=passive, rates=rates)
+        best = calc.solve_chains(rates, sources)
+        if calc.drop_unsourced_supplies(rates, best):
+            best = calc.solve_chains(rates, sources)
+        rows = []
+        for key, r in rates.items():
+            if not r.get("converter"):
+                row, _ = calc.chain_row(key, rates, best, sources, w.name, w.price, gold)
+                if row:
+                    rows.append(row)
+        mine = [r for r in rows if r["skill"] == skill]
+        top = max(mine, key=lambda r: r["xp_hr"], default=None)
+        gp_hr = max((r["gp_hr"] for r in rows), default=0)
+        setup = self._setup(p.get("loadout"))["setup"]
+        found, tables = self._boosters.build(skill, setup, rates, sources, best, top["key"] if top else None, gp_hr, rows,
+                                             p.get("section") or None, bool(p.get("hide_have")))
+        have = sum(1 for f in found if f["have"])
+        can = sum(1 for f in found if f["ok"] and not f["have"])
+        kpis = [{"v": str(len(found)), "l": f"Boosters for {skill}"}, {"v": str(have), "l": "You have"},
+                {"v": str(can), "l": "You can get now"},
+                {"v": str(len(found) - have - can), "l": "Locked (shown grey)"}]
+        banners = []
+        if top:
+            banners.append({"kind": "ok", "text": f"Effect is measured on your best {skill} action now, {top['name']} "
+                                                  f"({num(top['xp_hr'])} XP/hr). Times use your levels, your bank and the "
+                                                  "loadout above for combat drops; shop prices are turned into time at your "
+                                                  f"best gold rate ({num(gp_hr)} gp/hr)."})
+        return {"title": f"Boost {skill}", "kpis": kpis, "banners": banners, "tables": tables}
 
     # ------------------------------------------------------------ combat
     @staticmethod

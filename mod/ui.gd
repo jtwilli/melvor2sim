@@ -294,10 +294,20 @@ func table(t: Dictionary) -> Control:
 	if rows.is_empty():
 		grid.add_child(label("Nothing to show.", true))
 		return wrap
-	for r in rows:
+	# optional per-row flags: "dim" greys a row out (not reachable yet), "good" marks one you already have
+	var dim: Array = t.get("dim", [])
+	var good: Array = t.get("good", [])
+	for ri in rows.size():
+		var r = rows[ri]
+		var faded: bool = ri < dim.size() and dim[ri]
+		var mine: bool = ri < good.size() and good[ri]
 		for i in cols.size():
 			var cell := Label.new()
 			cell.text = String(r[i])
+			if faded:
+				cell.modulate = Color(1, 1, 1, 0.38)
+			elif mine and i == 0:
+				cell.add_theme_color_override("font_color", GOOD)
 			if cols[i]["num"]:
 				cell.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 			if wide[i]:
