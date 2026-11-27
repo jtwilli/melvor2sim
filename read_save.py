@@ -26,7 +26,7 @@ ROOT = Path(__file__).parent
 TABLES = ROOT / "data" / "tables"
 OUT = ROOT / "data" / "save"
 NS = "MelvorBase:"
-SUPPORTED_VERSION = 31
+SUPPORTED_VERSIONS = {31, 32}
 
 
 def short(i):
@@ -368,7 +368,7 @@ def d_stack_inventory(r):
     return stacks
 
 
-def d_bank(r):
+def d_bank(r, version=31):
     r.i32()  # default tab for new items
     tabs = []
     for _ in range(r.i32()):
@@ -376,6 +376,8 @@ def d_bank(r):
         label = r.str()
         for _ in range(r.i32()):  # associated bank tags
             r.bool(); r.bool(); r.str()
+        if version >= 32:
+            r.bool()  # additional per-tab flag introduced in save v32
         tabs.append({"label": label, "stacks": stacks})
     return tabs
 
@@ -513,8 +515,8 @@ def parse_save(path):
     header = read_header(r)
     entities = read_entities(r)
     warnings = []
-    if header["version"] != SUPPORTED_VERSION:
-        warnings.append(f"save version {header['version']} != {SUPPORTED_VERSION}; layouts may have changed")
+    if header["version"] not in SUPPORTED_VERSIONS:
+        warnings.append(f"save version {header['version']} not in {sorted(SUPPORTED_VERSIONS)}; layouts may have changed")
 
     state = {"save_file": path.name,"header": header, "skills": {}, "toolbelts": {}, "mastery_tasks": {},
              "value_statistics": {}, "item_statistics": {}, "object_statistics": {}}
@@ -535,7 +537,8 @@ def parse_save(path):
             state["object_statistics"].update(st["objects"])
 
     get = lambda e, c: entities.get(e, {}).get(c)
-    tabs = try_decode(d_bank, get("Bank", "Inventory"), "Bank/Inventory", warnings, [])
+    tabs = try_decode(lambda reader: d_bank(reader, header["version"]),
+                      get("Bank", "Inventory"), "Bank/Inventory", warnings, [])
     state["bank_tabs"] = tabs
     bank = defaultdict(int)
     for tab in tabs:
